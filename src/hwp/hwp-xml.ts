@@ -186,8 +186,26 @@ function generateParaXml(para: ParaInfo, indent: string): string {
   const ind2 = indent + '  ';
   const ind3 = ind2 + '  ';
 
-  lines.push(`${indent}<hp:p paraPrIDRef="${para.paraPrId}" styleIDRef="${para.styleId}">`);
+  lines.push(`${indent}<hp:p id="0" paraPrIDRef="${para.paraPrId}" styleIDRef="${para.styleId}" pageBreak="0" columnBreak="0" merged="0">`);
 
+  // Runs come before linesegarray (per HWPML spec)
+  for (const run of para.runs) {
+    const runXml = generateRunXml(run, ind2);
+    if (runXml) lines.push(runXml);
+  }
+
+  // Tables go inside a run element (not wrapped in <hp:ctrl>)
+  for (const ctrl of para.controls) {
+    if (ctrl.type === 'table') {
+      const firstCharPrId = para.runs.length > 0 ? para.runs[0].charPrId : 0;
+      lines.push(`${ind2}<hp:run charPrIDRef="${firstCharPrId}">`);
+      lines.push(...generateTableXml(ctrl, ind3));
+      lines.push(`${ind3}<hp:t/>`);
+      lines.push(`${ind2}</hp:run>`);
+    }
+  }
+
+  // linesegarray goes at the end
   if (para.lineSegs.length > 0) {
     lines.push(`${ind2}<hp:linesegarray>`);
     for (const seg of para.lineSegs) {
@@ -200,17 +218,6 @@ function generateParaXml(para: ParaInfo, indent: string): string {
     lines.push(`${ind2}</hp:linesegarray>`);
   }
 
-  for (const run of para.runs) {
-    const runXml = generateRunXml(run, ind2);
-    if (runXml) lines.push(runXml);
-  }
-
-  for (const ctrl of para.controls) {
-    if (ctrl.type === 'table') {
-      lines.push(...generateTableXml(ctrl, ind2));
-    }
-  }
-
   lines.push(`${indent}</hp:p>`);
   return lines.join('\n');
 }
@@ -221,14 +228,30 @@ function generateTableXml(table: TableControlInfo, indent: string): string[] {
   const ind3 = ind2 + '  ';
   const ind4 = ind3 + '  ';
 
+  // <hp:tbl> with required HWPML attributes
   lines.push(
-    `${indent}<hp:ctrl><hp:tbl rowCnt="${table.rowCount}" colCnt="${table.colCount}" ` +
-    `cellSpacing="${table.cellSpacing}" borderFillIDRef="${table.borderFillId}" ` +
-    `width="${table.ctrlWidth}" height="${table.ctrlHeight}" ` +
-    `innerMarginLeft="${table.innerMarginLeft}" innerMarginRight="${table.innerMarginRight}" ` +
-    `innerMarginTop="${table.innerMarginTop}" innerMarginBottom="${table.innerMarginBottom}" ` +
-    `outMarginLeft="${table.outMarginLeft}" outMarginRight="${table.outMarginRight}" ` +
-    `outMarginTop="${table.outMarginTop}" outMarginBottom="${table.outMarginBottom}">`
+    `${indent}<hp:tbl id="0" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" ` +
+    `textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="0" ` +
+    `rowCnt="${table.rowCount}" colCnt="${table.colCount}" ` +
+    `cellSpacing="${table.cellSpacing}" borderFillIDRef="${table.borderFillId}" noAdjust="0">`
+  );
+  // Size and position as child elements
+  lines.push(
+    `${ind2}<hp:sz width="${table.ctrlWidth}" widthRelTo="ABSOLUTE" ` +
+    `height="${table.ctrlHeight}" heightRelTo="ABSOLUTE" protect="0"/>`
+  );
+  lines.push(
+    `${ind2}<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" ` +
+    `holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" ` +
+    `vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>`
+  );
+  lines.push(
+    `${ind2}<hp:outMargin left="${table.outMarginLeft}" right="${table.outMarginRight}" ` +
+    `top="${table.outMarginTop}" bottom="${table.outMarginBottom}"/>`
+  );
+  lines.push(
+    `${ind2}<hp:inMargin left="${table.innerMarginLeft}" right="${table.innerMarginRight}" ` +
+    `top="${table.innerMarginTop}" bottom="${table.innerMarginBottom}"/>`
   );
 
   const rowMap = new Map<number, CellInfo[]>();
@@ -245,32 +268,36 @@ function generateTableXml(table: TableControlInfo, indent: string): string[] {
     lines.push(`${ind2}<hp:tr${rowSize > 0 ? ` rowSize="${rowSize}"` : ''}>`);
     for (const cell of cells) {
       const vertAlignStr = cell.vertAlign === 1 ? 'CENTER' : cell.vertAlign === 2 ? 'BOTTOM' : 'TOP';
-      const mLeft = cell.hasMargin ? cell.marginLeft : table.innerMarginLeft;
-      const mRight = cell.hasMargin ? cell.marginRight : table.innerMarginRight;
-      const mTop = cell.hasMargin ? cell.marginTop : table.innerMarginTop;
-      const mBottom = cell.hasMargin ? cell.marginBottom : table.innerMarginBottom;
+      const hasMarginVal = cell.hasMargin ? '1' : '0';
       lines.push(
-        `${ind3}<hp:tc colAddr="${cell.colAddr}" rowAddr="${cell.rowAddr}" ` +
-        `colSpan="${cell.colSpan}" rowSpan="${cell.rowSpan}" ` +
-        `width="${cell.width}" height="${cell.height}" ` +
-        `borderFillIDRef="${cell.borderFillId}" ` +
-        `marginLeft="${mLeft}" marginRight="${mRight}" ` +
-        `marginTop="${mTop}" marginBottom="${mBottom}">`
+        `${ind3}<hp:tc name="" header="0" hasMargin="${hasMarginVal}" ` +
+        `protect="0" editable="0" dirty="0" borderFillIDRef="${cell.borderFillId}">`
       );
       const ind5 = ind4 + '  ';
       const lineWrapStr = cell.lineWrap === 1 ? 'SQUEEZE' : cell.lineWrap === 2 ? 'KEEP' : 'BREAK';
-      const lineWrapAttr = cell.lineWrap !== 0 ? ` lineWrap="${lineWrapStr}"` : '';
-      lines.push(`${ind4}<hp:subList vertAlign="${vertAlignStr}"${lineWrapAttr}>`);
+      lines.push(
+        `${ind4}<hp:subList id="" textDirection="HORIZONTAL" lineWrap="${lineWrapStr}" ` +
+        `vertAlign="${vertAlignStr}" linkListIDRef="0" linkListNextIDRef="0" ` +
+        `textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">`
+      );
       for (const para of cell.paragraphs) {
         lines.push(generateParaXml(para, ind5));
       }
       lines.push(`${ind4}</hp:subList>`);
+      // Cell address/span/size/margin as child elements (after subList)
+      lines.push(`${ind4}<hp:cellAddr colAddr="${cell.colAddr}" rowAddr="${cell.rowAddr}"/>`);
+      lines.push(`${ind4}<hp:cellSpan colSpan="${cell.colSpan}" rowSpan="${cell.rowSpan}"/>`);
+      lines.push(`${ind4}<hp:cellSz width="${cell.width}" height="${cell.height}"/>`);
+      lines.push(
+        `${ind4}<hp:cellMargin left="${cell.marginLeft}" right="${cell.marginRight}" ` +
+        `top="${cell.marginTop}" bottom="${cell.marginBottom}"/>`
+      );
       lines.push(`${ind3}</hp:tc>`);
     }
     lines.push(`${ind2}</hp:tr>`);
   }
 
-  lines.push(`${ind2}</hp:tbl></hp:ctrl>`);
+  lines.push(`${ind2}</hp:tbl>`);
   return lines;
 }
 
@@ -282,15 +309,6 @@ export function generateSectionXml(
   const lines: string[] = [];
   lines.push(`<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>`);
   lines.push(`<hs:sec ${HWPX_NS} id="${sectionIndex}">`);
-
-  lines.push(
-    `  <hs:pageDef width="${pageDef.width}" height="${pageDef.height}" ` +
-    `landscape="${pageDef.landscape}" ` +
-    `marginLeft="${pageDef.marginLeft}" marginRight="${pageDef.marginRight}" ` +
-    `marginTop="${pageDef.marginTop}" marginBottom="${pageDef.marginBottom}" ` +
-    `marginHeader="${pageDef.marginHeader}" marginFooter="${pageDef.marginFooter}" ` +
-    `marginGutter="${pageDef.marginGutter}"/>`
-  );
 
   for (const para of paragraphs) {
     lines.push(generateParaXml(para, '  '));
