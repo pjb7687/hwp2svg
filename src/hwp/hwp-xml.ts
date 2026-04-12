@@ -324,6 +324,55 @@ export function generateContentHpf(sectionCount: number): string {
   return lines.join('\n');
 }
 
+export function generateContainerXml(): string {
+  return (
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
+    `<ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf">` +
+    `<ocf:rootfiles>` +
+    `<ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/>` +
+    `<ocf:rootfile full-path="Preview/PrvText.txt" media-type="text/plain"/>` +
+    `<ocf:rootfile full-path="META-INF/container.rdf" media-type="application/rdf+xml"/>` +
+    `</ocf:rootfiles></ocf:container>`
+  );
+}
+
+export function generateContainerRdf(sectionCount: number): string {
+  const NS = 'http://www.hancom.co.kr/hwpml/2016/meta/pkg#';
+  const parts: string[] = [];
+  parts.push(`<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>`);
+  parts.push(`<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">`);
+  parts.push(
+    `<rdf:Description rdf:about=""><ns0:hasPart xmlns:ns0="${NS}" rdf:resource="Contents/header.xml"/></rdf:Description>` +
+    `<rdf:Description rdf:about="Contents/header.xml"><rdf:type rdf:resource="${NS}HeaderFile"/></rdf:Description>`
+  );
+  for (let i = 0; i < sectionCount; i++) {
+    parts.push(
+      `<rdf:Description rdf:about=""><ns0:hasPart xmlns:ns0="${NS}" rdf:resource="Contents/section${i}.xml"/></rdf:Description>` +
+      `<rdf:Description rdf:about="Contents/section${i}.xml"><rdf:type rdf:resource="${NS}SectionFile"/></rdf:Description>`
+    );
+  }
+  parts.push(`<rdf:Description rdf:about=""><rdf:type rdf:resource="${NS}Document"/></rdf:Description>`);
+  parts.push(`</rdf:RDF>`);
+  return parts.join('');
+}
+
+export function generateManifestXml(): string {
+  return (
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
+    `<odf:manifest xmlns:odf="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>`
+  );
+}
+
+export function generateSettingsXml(): string {
+  return (
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
+    `<ha:HWPApplicationSetting xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" ` +
+    `xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0">` +
+    `<ha:CaretPosition listIDRef="0" paraIDRef="0" pos="0"/>` +
+    `</ha:HWPApplicationSetting>`
+  );
+}
+
 export function generateVersionXml(header: DocHeader): string {
   const { major, minor, patch, revision } = header.version;
   return (

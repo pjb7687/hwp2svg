@@ -10,7 +10,10 @@ import * as TAG from './constants.js';
 import * as fs from '../fs/idb-fs.js';
 import { parseDocInfoData } from './hwp-docinfo.js';
 import { parseSectionRecords } from './hwp-section.js';
-import { generateHeaderXml, generateSectionXml, generateContentHpf, generateVersionXml } from './hwp-xml.js';
+import {
+  generateHeaderXml, generateSectionXml, generateContentHpf, generateVersionXml,
+  generateContainerXml, generateContainerRdf, generateManifestXml, generateSettingsXml,
+} from './hwp-xml.js';
 import type { DocHeader } from './hwp-types.js';
 
 // ── Global decompression polyfill type ──
@@ -152,6 +155,13 @@ export async function convertHwpToHwpx(data: ArrayBuffer, docId: string): Promis
   // Write version.xml
   const versionXml = generateVersionXml(header);
   await fs.writeFile(docId, 'version.xml', versionXml);
+
+  // Write required container / metadata files
+  await fs.writeFile(docId, 'mimetype', 'application/hwp+zip');
+  await fs.writeFile(docId, 'META-INF/container.xml', generateContainerXml());
+  await fs.writeFile(docId, 'META-INF/container.rdf', generateContainerRdf(sectionCount));
+  await fs.writeFile(docId, 'META-INF/manifest.xml', generateManifestXml());
+  await fs.writeFile(docId, 'settings.xml', generateSettingsXml());
 
   // Extract embedded binary data
   await extractBinData(cfb, docId, docInfo.binDataItems);

@@ -52,10 +52,16 @@ console.log(`Converting ${basename(resolvedInput)} ...`);
 await convertHwpToHwpx(inputData.buffer as ArrayBuffer, docId);
 
 // Package all files from the virtual FS into a ZIP (.hwpx)
+// mimetype must be the first entry and stored uncompressed (no compression).
 const zip = new JSZip();
 const allFiles = await fs.readDir(docId, '');
 
+const mimetypeData = await fs.readFile(docId, 'mimetype');
+zip.file('mimetype', mimetypeData, { compression: 'STORE' });
+
 for (const filePath of allFiles) {
+  if (filePath === 'mimetype') continue;
+  if (filePath.endsWith('/')) continue; // skip directory entries
   const data = await fs.readFile(docId, filePath);
   zip.file(filePath, data);
 }
