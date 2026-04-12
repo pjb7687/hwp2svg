@@ -23,6 +23,7 @@ export interface ParaShapeInfo {
   spacingBefore: number;
   spacingAfter: number;
   lineSpacing: number;
+  lineWrap?: string;       // 'SQUEEZE' = 한 줄로 입력 (compress spacing to single line)
 }
 
 export interface BorderFillInfo {

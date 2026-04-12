@@ -195,7 +195,7 @@ export function buildFontFaceCSS(): string {
   // HWP renders spaces slightly wider than the SVG default font metrics.
   // An empirical 0.025em offset brings Korean body text widths in line with
   // the reference PDF rendering.
-  // No global word-spacing: HWP uses font's natural space width (per-character spacing via charShape)
+  rules.push('text { word-spacing: 0.03em; }');
   return `<defs><style type="text/css">\n${rules.join('\n')}\n</style></defs>`;
 }
 

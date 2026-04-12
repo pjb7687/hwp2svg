@@ -68,12 +68,19 @@ export function parseParaShape(data: Uint8Array): ParaShapeInfo {
   const borderFillId = data.length >= 34 ? dv.getUint16(32, true) : 0;
   const alignment = (attrs1 >> 2) & 0x07;
 
+  // attrs2 at offset 42 (5.0.1.7+): bit 0~1 = 한 줄로 입력 (0=Break, 1=Squeeze, 2=Keep)
+  let lineWrap = 0;
+  if (data.length >= 46) {
+    const attrs2 = dv.getUint32(42, true);
+    lineWrap = attrs2 & 0x3;
+  }
+
   if (data.length >= 54) {
     const lineSpacing2 = dv.getUint32(50, true);
     if (lineSpacing2 > 0) lineSpacing = lineSpacing2;
   }
 
-  return { attrs1, leftMargin, rightMargin, indent, spacingBefore, spacingAfter, lineSpacing, alignment, tabDefId, borderFillId };
+  return { attrs1, leftMargin, rightMargin, indent, spacingBefore, spacingAfter, lineSpacing, alignment, tabDefId, borderFillId, lineWrap };
 }
 
 export function parseBorderFill(data: Uint8Array, id: number): BorderFillInfo {

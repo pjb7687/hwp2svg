@@ -35,6 +35,7 @@ export interface ParaShapeInfo {
   alignment: number;
   tabDefId: number;
   borderFillId: number;
+  lineWrap: number;  // from attrs2 bit 0~1: 0=Break, 1=Squeeze (한 줄로 입력), 2=Keep
 }
 
 export interface BorderFillInfo {
@@ -150,6 +151,7 @@ export interface CellInfo {
   marginTop: number;
   marginBottom: number;
   vertAlign: number; // 0=TOP, 1=CENTER, 2=BOTTOM
+  lineWrap: number;  // 0=Break, 1=Squeeze (한 줄로 입력), 2=Keep
   paragraphs: ParaInfo[];
 }
 

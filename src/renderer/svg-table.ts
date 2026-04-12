@@ -460,6 +460,10 @@ export function renderCellContent(
   const cellParas = subList ? children(subList, 'p') : children(cellEl, 'p');
   const vertAlignStr = subList ? attr(subList, 'vertAlign', 'TOP').toUpperCase() : 'TOP';
   const vertAlignMode = vertAlignStr === 'CENTER' ? 1 : vertAlignStr === 'BOTTOM' ? 2 : 0;
+  // 한 줄로 입력 at cell level: subList.lineWrap="Squeeze" means all paragraphs in this cell
+  // must stay on one line, compressing character spacing to fit the cell width.
+  const cellLineWrap = subList ? attr(subList, 'lineWrap', '').toUpperCase() : '';
+  const cellSqueeze = cellLineWrap === 'SQUEEZE' || cellLineWrap === 'FIXED';
 
   // Cell bottom margin
   const mBottom = marginEl ? hu2mm(intAttr(marginEl, 'bottom', 141)) : hu2mm(intAttr(cellEl, 'marginBottom', 141));
@@ -489,6 +493,7 @@ export function renderCellContent(
     isLastLine?: boolean; // true if this is the last line of its paragraph
     justify?: boolean;   // paragraph uses JUSTIFY horizontal alignment
     distribute?: boolean; // paragraph uses DISTRIBUTE alignment (spread across horzsizeMm)
+    squeeze?: boolean;   // 한 줄로 입력: compress spacing to fit single line
   }
   // Content items: either text lines or nested tables, in paragraph order
   type ContentItem = { kind: 'line'; line: LineInfo } | { kind: 'table'; tbl: Element; heightMm: number; outMarginTopMm: number; outMarginBottomMm: number; outMarginLeftMm: number; outMarginRightMm: number; vertposMm?: number };
@@ -501,6 +506,9 @@ export function renderCellContent(
   for (const paraEl of cellParas) {
     const paraPrIdRef = attr(paraEl, 'paraPrIDRef', attr(paraEl, 'paraPrId', ''));
     const paraShape = paraPrIdRef ? caches.paraShapes.get(paraPrIdRef) : undefined;
+    // 한 줄로 입력: cell-level OR paragraph-level squeeze
+    const paraLineWrap = paraShape?.lineWrap?.toUpperCase() ?? '';
+    const isSqueeze = cellSqueeze || paraLineWrap === 'SQUEEZE' || paraLineWrap === 'FIXED';
     const runs = collectRuns(paraEl);
     const fullText = runs.map(r => r.text).join('');
 
@@ -518,12 +526,12 @@ export function renderCellContent(
       else if (align === 2) { anchor = 'end'; tx = x + cellW - mRight; }
 
       if (anchor === 'start') {
-        tx += hu2mm(paraShape.leftMargin);
+        tx += hu2mm(paraShape.leftMargin) * 0.53;
         if (paraShape.indent < 0) {
-          // 내어쓰기 (hanging indent): body lines indented right by |indent|
-          bodyIndentMm = hu2mm(-paraShape.indent);
+          // 내어쓰기 (hanging indent): body lines indented right by |indent| * 0.5mm
+          bodyIndentMm = hu2mm(-paraShape.indent) * 0.5;
         } else if (paraShape.indent > 0) {
-          firstLineIndentMm = hu2mm(paraShape.indent);
+          firstLineIndentMm = hu2mm(paraShape.indent) * 0.5;
         }
       }
     }
@@ -602,11 +610,13 @@ export function renderCellContent(
 
       lineRanges = [];
       let offset = 0;
-      const rawLines = fullText.split('\n');
+      // In squeeze mode, ignore newlines — all text must fit on one line
+      const rawLines = isSqueeze ? [fullText.replace(/\n/g, '')] : fullText.split('\n');
       for (let li = 0; li < rawLines.length; li++) {
         const rawLine = rawLines[li];
         let wrapped: string[];
-        if (lineSegs.length === 1 && rawLines.length === 1) {
+        if (isSqueeze || (lineSegs.length === 1 && rawLines.length === 1)) {
+          // Squeeze or single lineseg: no wrapping — force entire line to fit as-is
           wrapped = [rawLine];
         } else {
           wrapped = wrapText(rawLine, textWidth, fontSize);
@@ -624,7 +634,7 @@ export function renderCellContent(
           });
           offset += wrapped[wi].length;
         }
-        offset++; // skip the \n
+        offset++; // skip the \n (noop in squeeze mode since we removed newlines)
       }
     }
 
@@ -681,7 +691,7 @@ export function renderCellContent(
       const isLast = range === lineRanges[lineRanges.length - 1];
       const isJustify = paraShape?.alignment === 0;
       const isDistribute = paraShape?.alignment === 4;
-      const lineInfo: LineInfo = { segments, fontSize: lineFontSize, lineSpacing: paraLineSpacing, anchor, tx: lineTx, vertposMm: range.vertposMm, baselineMm: range.baselineMm, horzsizeMm: range.horzsizeMm, horzposMm: range.horzposMm, vertsizeMm: rangeVertsizeMm, spacingMm: rangeSpacingMm, isLastLine: isLast, justify: isJustify, distribute: isDistribute };
+      const lineInfo: LineInfo = { segments, fontSize: lineFontSize, lineSpacing: paraLineSpacing, anchor, tx: lineTx, vertposMm: range.vertposMm, baselineMm: range.baselineMm, horzsizeMm: range.horzsizeMm, horzposMm: range.horzposMm, vertsizeMm: rangeVertsizeMm, spacingMm: rangeSpacingMm, isLastLine: isLast, justify: isJustify, distribute: isDistribute, squeeze: isSqueeze };
       allLines.push(lineInfo);
       contentItems.push({ kind: 'line', line: lineInfo });
       if (rangeVertsizeMm !== undefined && rangeVertsizeMm > 0) {
@@ -796,21 +806,41 @@ export function renderCellContent(
     let textLengthAttr = '';
     if (line.horzsizeMm !== undefined && line.horzsizeMm > 0) {
       const lineText = line.segments.map(s => s.text).join('');
-      const naturalWidth = estimateTextWidth(lineText, line.fontSize);
-      // JUSTIFY: stretch non-last lines to fill horzsize (spacing only, glyphs stay natural)
-      // DISTRIBUTE: always spread text across the full horzsize
-      // Compression (naturalWidth > horzsize): scale both spacing and glyphs
-      if ((line.justify && !line.isLastLine || line.distribute) && naturalWidth < line.horzsizeMm && lineText.trim().length > 1) {
-        textLengthAttr = ` textLength="${line.horzsizeMm.toFixed(2)}" lengthAdjust="spacing"`;
-      } else if (naturalWidth > line.horzsizeMm * 1.02) {
-        textLengthAttr = ` textLength="${line.horzsizeMm.toFixed(2)}" lengthAdjust="spacingAndGlyphs"`;
+      // HWP never scales glyph widths at line level — only adjusts inter-character spacing (자간).
+      // horzsize is the pre-calculated target width from HWP's layout engine.
+      // JUSTIFY (align=0): non-last lines fill horzsize exactly via spacing.
+      // DISTRIBUTE (align=4): all lines fill horzsize via spacing between all characters.
+      // Cap at cell content width: horzsize may be page-relative in some documents.
+      if (((line.justify && !line.isLastLine) || line.distribute) && lineText.trim().length > 1) {
+        const targetWidth = Math.min(line.horzsizeMm, textWidth);
+        textLengthAttr = ` textLength="${targetWidth.toFixed(2)}" lengthAdjust="spacing"`;
+      } else if (line.squeeze && lineText.trim().length > 1) {
+        // 한 줄로 입력 (Squeeze): compress character spacing only when text would overflow.
+        // HWP stores horzsize = available line width (not the actual text width), so we can't
+        // use horzsizeMm to detect overflow — always estimate instead.
+        const est = estimateTextWidth(lineText, line.fontSize);
+        if (est > textWidth) {
+          textLengthAttr = ` textLength="${textWidth.toFixed(2)}" lengthAdjust="spacing"`;
+        }
+      } else if (line.anchor === 'end' && line.horzposMm !== undefined && lineText.trim().length > 1) {
+        // RIGHT-aligned: force text to exactly fill horzsize so left edge lands at textX+horzpos.
+        // Without this, natural font rendering may place the left edge slightly off.
+        const targetWidth = Math.min(line.horzsizeMm, textWidth);
+        if (targetWidth > 0) {
+          textLengthAttr = ` textLength="${targetWidth.toFixed(2)}" lengthAdjust="spacing"`;
+        }
       }
     }
-    // When lineseg horzpos is set, use it directly as the text start (incorporates leftMargin).
-    // Only apply horzpos offset for start-anchored text; center/end anchors are already
-    // positioned correctly by tx (x+cellW/2 or x+cellW-mRight) and must not be shifted further.
-    const lineTx = (line.horzposMm !== undefined && line.anchor === 'start')
-      ? textX + line.horzposMm
+    // horzpos = left edge of text segment (column-local, spec: "컬럼에서의 시작 위치").
+    // horzsize = segment width. Together they define the text area regardless of alignment.
+    //   start anchor: text left  = textX + horzpos
+    //   end anchor:   text right = textX + horzpos + horzsize
+    //   middle anchor: keep tx (x+cellW/2) — horzpos is not useful for centering
+    const lineTx =
+      (line.horzposMm !== undefined && line.anchor === 'start')
+        ? textX + line.horzposMm
+      : (line.horzposMm !== undefined && line.anchor === 'end' && line.horzsizeMm !== undefined)
+        ? textX + line.horzposMm + line.horzsizeMm
       : line.tx;
     if (line.segments.length === 1) {
       const seg = line.segments[0];

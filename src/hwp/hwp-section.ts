@@ -396,6 +396,7 @@ export function parseTableCell(
   const dv = dataView(listData);
 
   const listAttrs = listData.length >= 6 ? dv.getUint32(2, true) : 0;
+  const lineWrap = (listAttrs >> 3) & 0x3;  // 0=Break, 1=Squeeze, 2=Keep
   const vertAlign = (listAttrs >> 5) & 0x3;
 
   const cellFlags = listData.length >= 8 ? dv.getUint16(6, true) : 0;
@@ -415,6 +416,7 @@ export function parseTableCell(
     marginTop: 141,
     marginBottom: 141,
     vertAlign,
+    lineWrap,
     paragraphs: [],
   };
 

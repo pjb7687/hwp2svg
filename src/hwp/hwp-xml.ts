@@ -104,6 +104,8 @@ export function generateHeaderXml(info: DocInfoData): string {
       `lineSpacing="${ps.lineSpacing}"`,
       `borderFillId="${ps.borderFillId}"`,
     ];
+    if (ps.lineWrap === 1) attrs.push(`lineWrap="SQUEEZE"`);
+    else if (ps.lineWrap === 2) attrs.push(`lineWrap="KEEP"`);
     lines.push(`    <hh:paraPr ${attrs.join(' ')}/>`);
   }
   lines.push(`  </hh:paraProperties>`);
@@ -238,7 +240,9 @@ function generateTableXml(table: TableControlInfo, indent: string): string[] {
         `marginTop="${mTop}" marginBottom="${mBottom}">`
       );
       const ind5 = ind4 + '  ';
-      lines.push(`${ind4}<hp:subList vertAlign="${vertAlignStr}">`);
+      const lineWrapStr = cell.lineWrap === 1 ? 'SQUEEZE' : cell.lineWrap === 2 ? 'KEEP' : 'BREAK';
+      const lineWrapAttr = cell.lineWrap !== 0 ? ` lineWrap="${lineWrapStr}"` : '';
+      lines.push(`${ind4}<hp:subList vertAlign="${vertAlignStr}"${lineWrapAttr}>`);
       for (const para of cell.paragraphs) {
         lines.push(generateParaXml(para, ind5));
       }

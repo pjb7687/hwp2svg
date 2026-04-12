@@ -162,6 +162,10 @@ export function buildCaches(header: Document): Caches {
       if (lsVal > 0) lineSpacing = lsVal;
     }
 
+    // 한 줄로 입력 (LineWrap): 'Squeeze' = adjust spacing to fit single line; 'FIXED' (binary bit=1) also maps here
+    const lineWrapRaw = attr(el, 'lineWrap', attr(el, 'LineWrap', ''));
+    const lineWrap = lineWrapRaw ? lineWrapRaw.toUpperCase() : undefined;
+
     paraShapes.set(id, {
       alignment,
       leftMargin,
@@ -170,6 +174,7 @@ export function buildCaches(header: Document): Caches {
       spacingBefore,
       spacingAfter,
       lineSpacing,
+      lineWrap,
     });
   }
 
