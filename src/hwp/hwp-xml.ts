@@ -275,6 +275,24 @@ export function generateSectionXml(
 
   for (const para of paragraphs) {
     lines.push(generateParaXml(para, '  '));
+
+    // Emit caption paragraphs for any table control in this paragraph
+    for (const ctrl of para.controls) {
+      if (ctrl.type === 'table' && ctrl.captionParas && ctrl.captionParas.length > 0) {
+        // Compute table paragraph's absolute vertpos (from its first lineseg)
+        const tableParaVertpos = para.lineSegs.length > 0 ? para.lineSegs[0].vertPos : 0;
+        const captionOffset = tableParaVertpos + ctrl.ctrlHeight + (ctrl.captionGap ?? 0);
+        for (const capPara of ctrl.captionParas) {
+          // Deep-copy lineSegs with adjusted vertPos
+          const adjustedSegs = capPara.lineSegs.map(seg => ({
+            ...seg,
+            vertPos: captionOffset + seg.vertPos,
+          }));
+          const adjustedPara = { ...capPara, lineSegs: adjustedSegs };
+          lines.push(generateParaXml(adjustedPara, '  '));
+        }
+      }
+    }
   }
 
   lines.push(`</hs:sec>`);

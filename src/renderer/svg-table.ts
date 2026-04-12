@@ -138,6 +138,121 @@ export function renderCellBorderAndFill(
   return parts;
 }
 
+// ── Grid-line detection for table borders ──
+
+/** A resolved border spec (non-NONE, positive width). */
+interface BSpec { stroke: string; width: number; type: string }
+
+/** Get one side's border spec from a borderFill, or null if NONE/absent. */
+function bfSide(bf: BorderFillInfo | undefined, side: 'left' | 'right' | 'top' | 'bottom'): BSpec | null {
+  if (!bf) return null;
+  const type  = bf[`${side}BorderType`  as keyof BorderFillInfo] as string;
+  const wStr  = bf[`${side}BorderWidth` as keyof BorderFillInfo] as string;
+  const color = bf[`${side}BorderColor` as keyof BorderFillInfo] as string;
+  const width = parseBorderWidth(wStr);
+  if (width <= 0 || isBorderNone(type)) return null;
+  return { stroke: color, width, type };
+}
+
+/** Return the stronger of two border specs (larger width wins; non-null beats null). */
+function mergeSpec(a: BSpec | null, b: BSpec | null): BSpec | null {
+  if (!a) return b;
+  if (!b) return a;
+  return a.width >= b.width ? a : b;
+}
+
+/** Round coordinate to 3 decimal places for map keys. */
+function coord(n: number): string { return n.toFixed(3); }
+
+/** Cell geometry + border fill, used for grid-line collection. */
+interface CellGeo { x: number; y: number; w: number; h: number; bf: BorderFillInfo | undefined }
+
+/**
+ * Build H-line and V-line maps from all cell borders.
+ *
+ * Keys:
+ *   H-lines → "y|x1|x2"   (y constant, segment from x1 to x2)
+ *   V-lines → "x|y1|y2"   (x constant, segment from y1 to y2)
+ *
+ * For each position the strongest (widest) non-NONE spec wins.
+ * The table's borderFillIDRef is the per-cell default, NOT an outer-boundary box,
+ * so it is intentionally NOT applied as a fallback here.
+ */
+function buildGridLines(
+  cells: CellGeo[],
+  _tableBf: BorderFillInfo | undefined,
+): { hLines: Map<string, BSpec | null>; vLines: Map<string, BSpec | null> } {
+  const hLines = new Map<string, BSpec | null>();
+  const vLines = new Map<string, BSpec | null>();
+
+  function addH(y: number, x1: number, x2: number, spec: BSpec | null) {
+    const key = `${coord(y)}|${coord(Math.min(x1, x2))}|${coord(Math.max(x1, x2))}`;
+    hLines.set(key, mergeSpec(hLines.get(key) ?? null, spec));
+  }
+  function addV(x: number, y1: number, y2: number, spec: BSpec | null) {
+    const key = `${coord(x)}|${coord(Math.min(y1, y2))}|${coord(Math.max(y1, y2))}`;
+    vLines.set(key, mergeSpec(vLines.get(key) ?? null, spec));
+  }
+
+  for (const { x, y, w, h, bf } of cells) {
+    addH(y,     x, x + w, bfSide(bf, 'top'));
+    addH(y + h, x, x + w, bfSide(bf, 'bottom'));
+    addV(x,     y, y + h, bfSide(bf, 'left'));
+    addV(x + w, y, y + h, bfSide(bf, 'right'));
+  }
+
+  return { hLines, vLines };
+}
+
+/**
+ * Emit SVG line element(s) for a border segment.
+ *
+ * DOUBLE borders produce two parallel thin lines in a 1:2:1 ratio:
+ * each line is W/4 wide, gap is W/2, centers at ±3W/8 from nominal edge.
+ * All other types emit a single <line> using borderStrokeDasharray for style.
+ */
+function emitLine(
+  parts: string[],
+  x1: number, y1: number, x2: number, y2: number,
+  spec: BSpec,
+): void {
+  const isH = y1 === y2; // horizontal line (y constant)
+  if (spec.type.toUpperCase() === 'DOUBLE') {
+    // Each line W/3 thick, gap = W, centers at ±2W/3; total span = 5W/3
+    const lineW  = spec.width / 3;
+    const offset = spec.width * 2 / 3;
+    if (isH) {
+      parts.push(`<line x1="${x1.toFixed(2)}" y1="${(y1 - offset).toFixed(2)}" x2="${x2.toFixed(2)}" y2="${(y1 - offset).toFixed(2)}" stroke="${spec.stroke}" stroke-width="${lineW.toFixed(2)}"/>`);
+      parts.push(`<line x1="${x1.toFixed(2)}" y1="${(y1 + offset).toFixed(2)}" x2="${x2.toFixed(2)}" y2="${(y1 + offset).toFixed(2)}" stroke="${spec.stroke}" stroke-width="${lineW.toFixed(2)}"/>`);
+    } else {
+      parts.push(`<line x1="${(x1 - offset).toFixed(2)}" y1="${y1.toFixed(2)}" x2="${(x1 - offset).toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${spec.stroke}" stroke-width="${lineW.toFixed(2)}"/>`);
+      parts.push(`<line x1="${(x1 + offset).toFixed(2)}" y1="${y1.toFixed(2)}" x2="${(x1 + offset).toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${spec.stroke}" stroke-width="${lineW.toFixed(2)}"/>`);
+    }
+  } else {
+    const da = borderStrokeDasharray(spec.type);
+    parts.push(`<line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${spec.stroke}" stroke-width="${spec.width.toFixed(2)}"${da}/>`);
+  }
+}
+
+/** Render all non-null H/V line segments from buildGridLines. */
+function renderGridLines(
+  hLines: Map<string, BSpec | null>,
+  vLines: Map<string, BSpec | null>,
+): string[] {
+  const parts: string[] = [];
+  for (const [key, spec] of hLines) {
+    if (!spec) continue;
+    const [y, x1, x2] = key.split('|').map(Number);
+    emitLine(parts, x1, y, x2, y, spec);
+  }
+  for (const [key, spec] of vLines) {
+    if (!spec) continue;
+    const [x, y1, y2] = key.split('|').map(Number);
+    emitLine(parts, x, y1, x, y2, spec);
+  }
+  return parts;
+}
+
 /**
  * Build per-column widths by scanning ALL rows for cells with colSpan=1.
  * This avoids the bug where picking the "widest row" gives wrong widths
@@ -161,35 +276,41 @@ export function buildColWidthsFromRows(rows: Element[]): Map<number, number> {
     }
   }
 
-  // Second pass: try to derive missing column widths from merged cells
-  // e.g. if a cell spans cols 2-4 with total width W, and cols 2 and 3 are known,
-  // then col 4 = W - col2 - col3.
-  for (const rowEl of rows) {
-    for (const cellEl of findDirectCells(rowEl)) {
-      const addrEl = findChild(cellEl, 'cellAddr');
-      const colAddr = addrEl ? intAttr(addrEl, 'colAddr', 0) : intAttr(cellEl, 'colAddr', 0);
-      const spanEl = findChild(cellEl, 'cellSpan');
-      const colSpan = spanEl ? intAttr(spanEl, 'colSpan', 1) : intAttr(cellEl, 'colSpan', 1);
-      if (colSpan <= 1) continue;
-      const szEl = findChild(cellEl, 'cellSz');
-      const totalW = szEl ? intAttr(szEl, 'width', 0) : intAttr(cellEl, 'width', 0);
-      if (totalW <= 0) continue;
+  // Iterative derivation: repeat until no more columns can be inferred.
+  // Each pass may unlock new derivations (e.g. col11 known → col10 derivable → col8 derivable).
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const rowEl of rows) {
+      for (const cellEl of findDirectCells(rowEl)) {
+        const addrEl = findChild(cellEl, 'cellAddr');
+        const colAddr = addrEl ? intAttr(addrEl, 'colAddr', 0) : intAttr(cellEl, 'colAddr', 0);
+        const spanEl = findChild(cellEl, 'cellSpan');
+        const colSpan = spanEl ? intAttr(spanEl, 'colSpan', 1) : intAttr(cellEl, 'colSpan', 1);
+        if (colSpan <= 1) continue;
+        const szEl = findChild(cellEl, 'cellSz');
+        const totalW = szEl ? intAttr(szEl, 'width', 0) : intAttr(cellEl, 'width', 0);
+        if (totalW <= 0) continue;
 
-      // Count how many spanned columns are known vs unknown
-      let knownSum = 0;
-      let unknownCol = -1;
-      let unknownCount = 0;
-      for (let c = colAddr; c < colAddr + colSpan; c++) {
-        if (colWidths.has(c)) {
-          knownSum += colWidths.get(c)!;
-        } else {
-          unknownCol = c;
-          unknownCount++;
+        // Count how many spanned columns are known vs unknown
+        let knownSum = 0;
+        let unknownCol = -1;
+        let unknownCount = 0;
+        for (let c = colAddr; c < colAddr + colSpan; c++) {
+          if (colWidths.has(c)) {
+            knownSum += colWidths.get(c)!;
+          } else {
+            unknownCol = c;
+            unknownCount++;
+          }
         }
-      }
-      if (unknownCount === 1 && unknownCol >= 0) {
-        const derived = totalW - knownSum;
-        if (derived > 0) colWidths.set(unknownCol, derived);
+        if (unknownCount === 1 && unknownCol >= 0) {
+          const derived = totalW - knownSum;
+          if (derived > 0 && !colWidths.has(unknownCol)) {
+            colWidths.set(unknownCol, derived);
+            progress = true;
+          }
+        }
       }
     }
   }
@@ -367,6 +488,7 @@ export function renderCellContent(
     spacingMm?: number;  // extra inter-line spacing (from lineseg)
     isLastLine?: boolean; // true if this is the last line of its paragraph
     justify?: boolean;   // paragraph uses JUSTIFY horizontal alignment
+    distribute?: boolean; // paragraph uses DISTRIBUTE alignment (spread across horzsizeMm)
   }
   // Content items: either text lines or nested tables, in paragraph order
   type ContentItem = { kind: 'line'; line: LineInfo } | { kind: 'table'; tbl: Element; heightMm: number; outMarginTopMm: number; outMarginBottomMm: number; outMarginLeftMm: number; outMarginRightMm: number; vertposMm?: number };
@@ -558,7 +680,8 @@ export function renderCellContent(
       const rangeSpacingMm = range.spacingMm;
       const isLast = range === lineRanges[lineRanges.length - 1];
       const isJustify = paraShape?.alignment === 0;
-      const lineInfo: LineInfo = { segments, fontSize: lineFontSize, lineSpacing: paraLineSpacing, anchor, tx: lineTx, vertposMm: range.vertposMm, baselineMm: range.baselineMm, horzsizeMm: range.horzsizeMm, horzposMm: range.horzposMm, vertsizeMm: rangeVertsizeMm, spacingMm: rangeSpacingMm, isLastLine: isLast, justify: isJustify };
+      const isDistribute = paraShape?.alignment === 4;
+      const lineInfo: LineInfo = { segments, fontSize: lineFontSize, lineSpacing: paraLineSpacing, anchor, tx: lineTx, vertposMm: range.vertposMm, baselineMm: range.baselineMm, horzsizeMm: range.horzsizeMm, horzposMm: range.horzposMm, vertsizeMm: rangeVertsizeMm, spacingMm: rangeSpacingMm, isLastLine: isLast, justify: isJustify, distribute: isDistribute };
       allLines.push(lineInfo);
       contentItems.push({ kind: 'line', line: lineInfo });
       if (rangeVertsizeMm !== undefined && rangeVertsizeMm > 0) {
@@ -604,7 +727,11 @@ export function renderCellContent(
   if (totalContentH > cellH) {
     clipH = totalContentH + hu2mm(282); // add small padding
   }
-  parts.push(`<clipPath id="${clipId}"><rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${cellW.toFixed(2)}" height="${clipH.toFixed(2)}"/></clipPath>`);
+  // Expand clip rect left by mLeft so right-aligned text that is slightly wider
+  // than the content area isn't clipped — mirrors the mRight buffer on the right.
+  const clipX = x - mLeft;
+  const clipW = cellW + mLeft;
+  parts.push(`<clipPath id="${clipId}"><rect x="${clipX.toFixed(2)}" y="${y.toFixed(2)}" width="${clipW.toFixed(2)}" height="${clipH.toFixed(2)}"/></clipPath>`);
 
   const textOnlyH = anyLinesegData ? maxLineBottomMm : totalContentH - mTop - mBottom;
   let effectiveVertAlign = vertAlignMode;
@@ -670,14 +797,20 @@ export function renderCellContent(
     if (line.horzsizeMm !== undefined && line.horzsizeMm > 0) {
       const lineText = line.segments.map(s => s.text).join('');
       const naturalWidth = estimateTextWidth(lineText, line.fontSize);
-      if (naturalWidth > line.horzsizeMm * 1.02) {
+      // DISTRIBUTE: always spread text across the full horzsize (spacing only, glyphs stay natural size)
+      // Compression (naturalWidth > horzsize): scale both spacing and glyphs
+      if (line.distribute && naturalWidth < line.horzsizeMm) {
+        textLengthAttr = ` textLength="${line.horzsizeMm.toFixed(2)}" lengthAdjust="spacing"`;
+      } else if (naturalWidth > line.horzsizeMm * 1.02) {
         textLengthAttr = ` textLength="${line.horzsizeMm.toFixed(2)}" lengthAdjust="spacingAndGlyphs"`;
       }
     }
     // When lineseg horzpos is set, use it directly as the text start (incorporates leftMargin).
+    // Only apply horzpos offset for start-anchored text; center/end anchors are already
+    // positioned correctly by tx (x+cellW/2 or x+cellW-mRight) and must not be shifted further.
     const lineTx = (line.horzposMm !== undefined && line.anchor === 'start')
       ? textX + line.horzposMm
-      : line.tx + (line.horzposMm ?? 0);
+      : line.tx;
     if (line.segments.length === 1) {
       const seg = line.segments[0];
       parts.push(`<text xml:space="preserve" x="${lineTx.toFixed(2)}" y="${textY.toFixed(2)}" font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${seg.ls}${textLengthAttr} text-anchor="${line.anchor}">${escapeXml(seg.text)}</text>`);
@@ -772,6 +905,33 @@ export function renderTableWithPageBreaks(
     }
   }
 
+  const tableBfIdRef = attr(tblEl, 'borderFillIDRef', '');
+  const tableBf = tableBfIdRef ? caches.borderFills.get(tableBfIdRef) : undefined;
+
+  // Per-page segment: accumulate cells, flush when page breaks or table ends
+  interface PCell { x: number; y: number; w: number; h: number; bf: BorderFillInfo | undefined; el: Element; declaredH: number }
+  let segmentCells: PCell[] = [];
+  let segmentStartY = yPos;
+
+  function flushSegment(parts: string[], segY: number): void {
+    if (segmentCells.length === 0) return;
+    // Phase 1: fills
+    for (const pc of segmentCells) {
+      if (pc.bf?.fillColor) {
+        parts.push(`<rect x="${pc.x.toFixed(2)}" y="${pc.y.toFixed(2)}" width="${pc.w.toFixed(2)}" height="${pc.h.toFixed(2)}" fill="${pc.bf.fillColor}" stroke="none"/>`);
+      }
+    }
+    // Phase 2: grid-detected border lines
+    const { hLines, vLines } = buildGridLines(segmentCells.map(pc => ({ x: pc.x, y: pc.y, w: pc.w, h: pc.h, bf: pc.bf })), tableBf);
+    parts.push(...renderGridLines(hLines, vLines));
+    // Phase 3: cell content
+    for (const pc of segmentCells) {
+      parts.push(...renderCellContent(pc.el, caches, pc.x, pc.y, pc.w, pc.h, pc.declaredH));
+    }
+    void segY;
+    segmentCells = [];
+  }
+
   let pageParts: string[] = [`<g class="table">`];
 
   for (const { rowAddr, cells, height: rowH } of rowMeta) {
@@ -781,14 +941,17 @@ export function renderTableWithPageBreaks(
     const actualRowH = rowHeights.get(rowAddr) ?? rowH;
 
     if (yPos + actualRowH > dims.pageBottom && pages[currentPage].length > 0) {
+      // Flush accumulated cells before page break
+      flushSegment(pageParts, segmentStartY);
       pageParts.push('</g>');
       if (pageParts.length > 2) {
-        pages[currentPage].push({ svg: pageParts.join('\n'), y: yPos, height: 0 });
+        pages[currentPage].push({ svg: pageParts.join('\n'), y: segmentStartY, height: 0 });
       }
 
       pages.push([]);
       currentPage = pages.length - 1;
       yPos = dims.contentTop;
+      segmentStartY = yPos;
       pageParts = [`<g class="table">`];
     }
 
@@ -825,20 +988,19 @@ export function renderTableWithPageBreaks(
       const declaredCellH = szElCell ? hu2mm(intAttr(szElCell, 'height', 0)) : hu2mm(intAttr(cellEl, 'height', 0));
 
       const x = dims.contentLeft + (colOffsets.get(colAddr) ?? 0);
-
       const bfIdRef = attr(cellEl, 'borderFillIDRef', '');
       const borderFill = bfIdRef ? caches.borderFills.get(bfIdRef) : undefined;
-      pageParts.push(...renderCellBorderAndFill(x, yPos, cellW, cellH, borderFill));
-      pageParts.push(...renderCellContent(cellEl, caches, x, yPos, cellW, cellH, declaredCellH));
+      segmentCells.push({ x, y: yPos, w: cellW, h: cellH, bf: borderFill, el: cellEl, declaredH: declaredCellH });
     }
 
     yPos += actualRowH;
   }
 
+  // Flush final page segment
+  flushSegment(pageParts, segmentStartY);
   pageParts.push('</g>');
   if (pageParts.length > 2) {
-    const tableStartY = yPos - (rowHeights.get(rowMeta[rowMeta.length - 1]?.rowAddr ?? 0) ?? 0);
-    pages[currentPage].push({ svg: pageParts.join('\n'), y: tableStartY, height: yPos - tableStartY });
+    pages[currentPage].push({ svg: pageParts.join('\n'), y: segmentStartY, height: yPos - segmentStartY });
   }
 
   yPos += outMarginBottom;
@@ -911,7 +1073,13 @@ export function renderTableEl(
     }
   }
 
-  const parts: string[] = [`<g class="table">`];
+  const tableBfIdRef = attr(tblEl, 'borderFillIDRef', '');
+  const tableBf = tableBfIdRef ? caches.borderFills.get(tableBfIdRef) : undefined;
+
+  // Collect all cell geometries + elements for two-phase rendering
+  interface PCell { x: number; y: number; w: number; h: number; bf: BorderFillInfo | undefined; el: Element; declaredH: number }
+  const pendingCells: PCell[] = [];
+
   let y = startY;
   const renderedRows = new Set<number>();
 
@@ -960,14 +1128,27 @@ export function renderTableEl(
       const declaredCellH = szElCell2 ? hu2mm(intAttr(szElCell2, 'height', 0)) : hu2mm(intAttr(cellEl, 'height', 0));
 
       const x = startX + (colOffsets.get(colAddr) ?? 0);
-
       const bfIdRef = attr(cellEl, 'borderFillIDRef', '');
       const borderFill = bfIdRef ? caches.borderFills.get(bfIdRef) : undefined;
-      parts.push(...renderCellBorderAndFill(x, y, cellW, cellH, borderFill));
-      parts.push(...renderCellContent(cellEl, caches, x, y, cellW, cellH, declaredCellH));
+      pendingCells.push({ x, y, w: cellW, h: cellH, bf: borderFill, el: cellEl, declaredH: declaredCellH });
     }
 
     y += rowH;
+  }
+
+  // Phase 1: all fills
+  const parts: string[] = [`<g class="table">`];
+  for (const pc of pendingCells) {
+    if (pc.bf?.fillColor) {
+      parts.push(`<rect x="${pc.x.toFixed(2)}" y="${pc.y.toFixed(2)}" width="${pc.w.toFixed(2)}" height="${pc.h.toFixed(2)}" fill="${pc.bf.fillColor}" stroke="none"/>`);
+    }
+  }
+  // Phase 2: grid-detected border lines (each unique segment once, table outer border as fallback)
+  const { hLines, vLines } = buildGridLines(pendingCells.map(pc => ({ x: pc.x, y: pc.y, w: pc.w, h: pc.h, bf: pc.bf })), tableBf);
+  parts.push(...renderGridLines(hLines, vLines));
+  // Phase 3: cell content (clips + text, over the borders)
+  for (const pc of pendingCells) {
+    parts.push(...renderCellContent(pc.el, caches, pc.x, pc.y, pc.w, pc.h, pc.declaredH));
   }
 
   parts.push('</g>');

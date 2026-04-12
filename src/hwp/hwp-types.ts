@@ -131,6 +131,9 @@ export interface TableControlInfo {
   outMarginRight: number;
   outMarginTop: number;
   outMarginBottom: number;
+  captionParas?: ParaInfo[];
+  captionGap?: number;
+  captionDir?: number;
 }
 
 export interface CellInfo {

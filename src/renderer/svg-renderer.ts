@@ -44,7 +44,10 @@ function renderSection(sectionDoc: Document, caches: Caches): string[] {
   const pages: LayoutItem[][] = [[]];
   let currentPage = 0;
   let yPos = dims.contentTop;
-  let lastVertEnd = 0;
+  // Track previous paragraph's START vertPos for page-break detection.
+  // Using start (not end) avoids false breaks when a table's lineseg spans
+  // its caption area, making lastVertEnd larger than where captions begin.
+  let lastParaStartVP = 0;
 
   // Walk direct <hp:p> and <hp:tbl> children of section root
   for (const child of Array.from(root.children)) {
@@ -52,9 +55,9 @@ function renderSection(sectionDoc: Document, caches: Caches): string[] {
     if (lname === 'p') {
       const linesegArray = children(child, 'linesegarray')[0];
       const firstSeg = linesegArray ? children(linesegArray, 'lineseg')[0] : null;
-      if (firstSeg && lastVertEnd > 0) {
+      if (firstSeg && lastParaStartVP > 0) {
         const vertpos = intAttr(firstSeg, 'vertpos', 0);
-        if (vertpos < lastVertEnd - 2000 && pages[currentPage].length > 0) {
+        if (vertpos < lastParaStartVP - 2000 && pages[currentPage].length > 0) {
           pages.push([]);
           currentPage = pages.length - 1;
           yPos = dims.contentTop;
@@ -67,14 +70,7 @@ function renderSection(sectionDoc: Document, caches: Caches): string[] {
         const absoluteY = dims.contentTop + hu2mm(vertpos);
         yPos = absoluteY;
         useAbsolutePos = true;
-
-        const allSegs = linesegArray ? children(linesegArray!, 'lineseg') : [];
-        if (allSegs.length > 0) {
-          const lastSeg = allSegs[allSegs.length - 1];
-          const vp = intAttr(lastSeg, 'vertpos', 0);
-          const vs = intAttr(lastSeg, 'vertSize', 0);
-          lastVertEnd = vp + vs;
-        }
+        lastParaStartVP = vertpos;
       }
 
       yPos = renderParagraphEl(child, caches, dims, pages, currentPage, yPos, useAbsolutePos);

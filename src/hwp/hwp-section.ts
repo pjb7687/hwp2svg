@@ -260,8 +260,32 @@ export function parseControl(
     const outMarginTop = ctrlData.length >= 34 ? ctrlDv.getUint16(32, true) : 0;
     const outMarginBottom = ctrlData.length >= 36 ? ctrlDv.getUint16(34, true) : 0;
 
+    // Parse caption LIST_H (and its paragraphs) that appear before HWPTAG_TABLE
+    const captionParas: ReturnType<typeof parseParagraph>[0][] = [];
+    let captionGap = 0;
+    let captionDir = 3; // default: bottom
     while (i < records.length && records[i].level > ctrlLevel && records[i].tagId !== TAG.HWPTAG_TABLE) {
-      i++;
+      if (records[i].tagId === TAG.HWPTAG_LIST_HEADER) {
+        const listLevel = records[i].level;
+        const lh = records[i];
+        if (lh.data.length >= 10) {
+          const ldv = dataView(lh.data);
+          captionDir = ldv.getUint32(0, true) & 3;
+          captionGap = ldv.getUint16(8, true);
+        }
+        i++;
+        while (i < records.length && records[i].level >= listLevel && records[i].tagId !== TAG.HWPTAG_TABLE) {
+          if (records[i].tagId === TAG.HWPTAG_PARA_HEADER) {
+            const [para, nextI] = parseParagraph(records, i);
+            captionParas.push(para);
+            i = nextI;
+          } else {
+            i++;
+          }
+        }
+      } else {
+        i++;
+      }
     }
     if (i < records.length && records[i].tagId === TAG.HWPTAG_TABLE) {
       const [table, nextI] = parseTableControl(records, i);
@@ -271,6 +295,11 @@ export function parseControl(
       table.outMarginRight = outMarginRight;
       table.outMarginTop = outMarginTop;
       table.outMarginBottom = outMarginBottom;
+      if (captionParas.length > 0) {
+        table.captionParas = captionParas;
+        table.captionGap = captionGap;
+        table.captionDir = captionDir;
+      }
       return [table, nextI];
     }
   } else if (ctrlId === 'secd') {

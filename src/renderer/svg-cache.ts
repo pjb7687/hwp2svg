@@ -12,6 +12,8 @@ const ALIGN_MAP: Record<string, number> = {
   'LEFT': 1,
   'RIGHT': 2,
   'CENTER': 3,
+  'DISTRIBUTE': 4,
+  'DISTRIBUTE_SPACE': 4,
 };
 
 export function parseAlign(el: Element, attrName: string, def: number): number {
