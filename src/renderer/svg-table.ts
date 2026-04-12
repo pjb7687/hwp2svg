@@ -844,7 +844,11 @@ export function renderCellContent(
       : line.tx;
     if (line.segments.length === 1) {
       const seg = line.segments[0];
-      parts.push(`<text xml:space="preserve" x="${lineTx.toFixed(2)}" y="${textY.toFixed(2)}" font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${seg.ls}${textLengthAttr} text-anchor="${line.anchor}">${escapeXml(seg.text)}</text>`);
+      // Suppress letter-spacing when textLength is applied with end-anchor:
+      // SVG's negative letter-spacing adds trailing space AFTER the last glyph's advance,
+      // which shifts the glyph visually past the anchor point. textLength already handles spacing.
+      const lsAttr = (textLengthAttr && line.anchor === 'end') ? '' : seg.ls;
+      parts.push(`<text xml:space="preserve" x="${lineTx.toFixed(2)}" y="${textY.toFixed(2)}" font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${lsAttr}${textLengthAttr} text-anchor="${line.anchor}">${escapeXml(seg.text)}</text>`);
     } else {
       const tspans = line.segments.map(seg =>
         `<tspan font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${seg.ls}>${escapeXml(seg.text)}</tspan>`
