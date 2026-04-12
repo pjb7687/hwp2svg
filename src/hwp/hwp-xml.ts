@@ -13,6 +13,24 @@ const NS_HS = 'http://www.hancom.co.kr/hwpml/2011/section';
 const NS_HC = 'http://www.hancom.co.kr/hwpml/2011/core';
 const NS_OPF = 'http://www.idpf.org/2007/opf/';
 
+// Standard HWPX namespace block (all files must declare these)
+const HWPX_NS =
+  `xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" ` +
+  `xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" ` +
+  `xmlns:hp10="http://www.hancom.co.kr/hwpml/2016/paragraph" ` +
+  `xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" ` +
+  `xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core" ` +
+  `xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" ` +
+  `xmlns:hhs="http://www.hancom.co.kr/hwpml/2011/history" ` +
+  `xmlns:hm="http://www.hancom.co.kr/hwpml/2011/master-page" ` +
+  `xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf" ` +
+  `xmlns:dc="http://purl.org/dc/elements/1.1/" ` +
+  `xmlns:opf="http://www.idpf.org/2007/opf/" ` +
+  `xmlns:ooxmlchart="http://www.hancom.co.kr/hwpml/2016/ooxmlchart" ` +
+  `xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar" ` +
+  `xmlns:epub="http://www.idpf.org/2007/ops" ` +
+  `xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"`;
+
 // ── Utility ──
 
 function colorrefToHex(colorref: number): string {
@@ -49,8 +67,8 @@ const ALIGN_MAP: Record<number, string> = {
 
 export function generateHeaderXml(info: DocInfoData): string {
   const lines: string[] = [];
-  lines.push(`<?xml version="1.0" encoding="UTF-8"?>`);
-  lines.push(`<hh:head xmlns:hh="${NS_HH}">`);
+  lines.push(`<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>`);
+  lines.push(`<hh:head ${HWPX_NS} version="1.4" secCnt="${info.sectionCount}">`);
 
   // fontfaces
   lines.push(`  <hh:fontfaces>`);
@@ -262,11 +280,8 @@ export function generateSectionXml(
   paragraphs: ParaInfo[],
 ): string {
   const lines: string[] = [];
-  lines.push(`<?xml version="1.0" encoding="UTF-8"?>`);
-  lines.push(
-    `<hs:sec xmlns:hs="${NS_HS}" xmlns:hp="${NS_HP}" ` +
-    `id="${sectionIndex}">`
-  );
+  lines.push(`<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>`);
+  lines.push(`<hs:sec ${HWPX_NS} id="${sectionIndex}">`);
 
   lines.push(
     `  <hs:pageDef width="${pageDef.width}" height="${pageDef.height}" ` +
@@ -306,22 +321,27 @@ export function generateSectionXml(
 // ── Manifest / content.hpf ──
 
 export function generateContentHpf(sectionCount: number): string {
-  const lines: string[] = [];
-  lines.push(`<?xml version="1.0" encoding="UTF-8"?>`);
-  lines.push(`<opf:package xmlns:opf="${NS_OPF}" version="2.0">`);
-  lines.push(`  <opf:manifest>`);
-  lines.push(`    <opf:item id="header" href="header.xml" media-type="application/xml"/>`);
+  const parts: string[] = [];
+  parts.push(`<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>`);
+  parts.push(`<opf:package ${HWPX_NS} version="" unique-identifier="" id="">`);
+  parts.push(`<opf:metadata>`);
+  parts.push(`<opf:language>ko</opf:language>`);
+  parts.push(`</opf:metadata>`);
+  parts.push(`<opf:manifest>`);
+  parts.push(`<opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>`);
   for (let i = 0; i < sectionCount; i++) {
-    lines.push(`    <opf:item id="section${i}" href="section${i}.xml" media-type="application/xml"/>`);
+    parts.push(`<opf:item id="section${i}" href="Contents/section${i}.xml" media-type="application/xml"/>`);
   }
-  lines.push(`  </opf:manifest>`);
-  lines.push(`  <opf:spine>`);
+  parts.push(`<opf:item id="settings" href="settings.xml" media-type="application/xml"/>`);
+  parts.push(`</opf:manifest>`);
+  parts.push(`<opf:spine>`);
+  parts.push(`<opf:itemref idref="header" linear="yes"/>`);
   for (let i = 0; i < sectionCount; i++) {
-    lines.push(`    <opf:itemref idref="section${i}"/>`);
+    parts.push(`<opf:itemref idref="section${i}" linear="yes"/>`);
   }
-  lines.push(`  </opf:spine>`);
-  lines.push(`</opf:package>`);
-  return lines.join('\n');
+  parts.push(`</opf:spine>`);
+  parts.push(`</opf:package>`);
+  return parts.join('');
 }
 
 export function generateContainerXml(): string {
@@ -376,9 +396,10 @@ export function generateSettingsXml(): string {
 export function generateVersionXml(header: DocHeader): string {
   const { major, minor, patch, revision } = header.version;
   return (
-    `<?xml version="1.0" encoding="UTF-8"?>\n` +
-    `<hc:coreProperties xmlns:hc="${NS_HC}">\n` +
-    `  <hc:version>${major}.${minor}.${patch}.${revision}</hc:version>\n` +
-    `</hc:coreProperties>`
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
+    `<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" ` +
+    `tagetApplication="WORDPROCESSOR" ` +
+    `major="${major}" minor="${minor}" micro="${patch}" buildNumber="${revision}" ` +
+    `os="1" xmlVersion="1.4" application="hwp2svg"/>`
   );
 }
