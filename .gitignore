@@ -13,3 +13,5 @@
 !LICENSE
 !.gitignore
 !package.json
+!tsconfig.json
+!tsconfig.cli.json

@@ -1,6 +1,6 @@
 # hwp-to-svg
 
-Convert HWP/HWPX (한글) documents to SVG, one SVG per page.
+A pure JavaScript/TypeScript implementation to convert Korean HWP/HWPX (한글) documents to SVG (one SVG per page) or to HWPX format.
 
 ## Installation
 
@@ -10,6 +10,8 @@ npm install hwp-to-svg
 
 ## CLI Usage
 
+### HWP/HWPX → SVG
+
 ```bash
 # Convert all pages
 hwp2svg document.hwp -o output/
@@ -17,6 +19,13 @@ hwp2svg document.hwp -o output/
 # Convert specific pages
 hwp2svg document.hwpx -o output/ -p 0-2
 hwp2svg document.hwp -o output/ -p 0,2,4
+```
+
+### HWP → HWPX
+
+```bash
+hwp2hwpx document.hwp
+hwp2hwpx document.hwp -o output.hwpx
 ```
 
 ## API Usage

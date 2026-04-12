@@ -15,7 +15,9 @@ import { inflateRawSync } from 'node:zlib';
 };
 
 // Import library AFTER polyfills are set up
-const { HwpxDocument } = await import('../dist/index.js');
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore — path resolves correctly at runtime from dist/cli/
+const { HwpxDocument } = await import('../index.js');
 
 // Fonts are installed system-wide (~/.local/share/fonts/ or system fonts dir).
 // No embedding needed — SVG references fonts by name in font-family attributes.
