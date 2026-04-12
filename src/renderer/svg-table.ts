@@ -518,12 +518,12 @@ export function renderCellContent(
       else if (align === 2) { anchor = 'end'; tx = x + cellW - mRight; }
 
       if (anchor === 'start') {
-        tx += hu2mm(paraShape.leftMargin) * 0.53;
+        tx += hu2mm(paraShape.leftMargin);
         if (paraShape.indent < 0) {
-          // 내어쓰기 (hanging indent): body lines indented right by |indent| * 0.5mm
-          bodyIndentMm = hu2mm(-paraShape.indent) * 0.5;
+          // 내어쓰기 (hanging indent): body lines indented right by |indent|
+          bodyIndentMm = hu2mm(-paraShape.indent);
         } else if (paraShape.indent > 0) {
-          firstLineIndentMm = hu2mm(paraShape.indent) * 0.5;
+          firstLineIndentMm = hu2mm(paraShape.indent);
         }
       }
     }
@@ -797,9 +797,10 @@ export function renderCellContent(
     if (line.horzsizeMm !== undefined && line.horzsizeMm > 0) {
       const lineText = line.segments.map(s => s.text).join('');
       const naturalWidth = estimateTextWidth(lineText, line.fontSize);
-      // DISTRIBUTE: always spread text across the full horzsize (spacing only, glyphs stay natural size)
+      // JUSTIFY: stretch non-last lines to fill horzsize (spacing only, glyphs stay natural)
+      // DISTRIBUTE: always spread text across the full horzsize
       // Compression (naturalWidth > horzsize): scale both spacing and glyphs
-      if (line.distribute && naturalWidth < line.horzsizeMm) {
+      if ((line.justify && !line.isLastLine || line.distribute) && naturalWidth < line.horzsizeMm && lineText.trim().length > 1) {
         textLengthAttr = ` textLength="${line.horzsizeMm.toFixed(2)}" lengthAdjust="spacing"`;
       } else if (naturalWidth > line.horzsizeMm * 1.02) {
         textLengthAttr = ` textLength="${line.horzsizeMm.toFixed(2)}" lengthAdjust="spacingAndGlyphs"`;

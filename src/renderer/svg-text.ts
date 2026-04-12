@@ -85,18 +85,41 @@ export function renderLineSegEl(
   paraEl: Element,
   seg: Element,
   segIdx: number,
-  _allSegs: Element[],
+  allSegs: Element[],
   caches: Caches,
   contentLeft: number,
-  yPos: number,
+  contentTop: number,
   contentWidth: number,
   paraShape: ParaShapeInfo | undefined,
 ): string | null {
   const runs = collectRuns(paraEl);
-  const text = segIdx === 0 ? runs.map(r => r.text).join('') : '';
-  if (!text.trim()) return null;
+  const fullText = runs.map(r => r.text).join('');
 
-  const firstRun = runs[0];
+  // Determine the text slice for this lineseg using textpos
+  const startPos = intAttr(seg, 'textpos', 0);
+  const nextSeg = allSegs[segIdx + 1];
+  const endPos = nextSeg ? intAttr(nextSeg, 'textpos', fullText.length) : fullText.length;
+  const lineText = fullText.substring(startPos, endPos);
+
+  if (!lineText.trim()) return null;
+
+  // Determine which runs fall within this line's text range
+  const lineRuns: RunInfo[] = [];
+  let pos = 0;
+  for (const run of runs) {
+    const runStart = pos;
+    const runEnd = pos + run.text.length;
+    if (runEnd <= startPos || runStart >= endPos) {
+      pos += run.text.length;
+      continue;
+    }
+    const sliceStart = Math.max(runStart, startPos) - runStart;
+    const sliceEnd = Math.min(runEnd, endPos) - runStart;
+    lineRuns.push({ text: run.text.substring(sliceStart, sliceEnd), charPrId: run.charPrId });
+    pos += run.text.length;
+  }
+
+  const firstRun = lineRuns[0] ?? runs[0];
   const cs = firstRun ? caches.charShapes.get(firstRun.charPrId) : undefined;
   const fontSize = cs ? hu2mm(cs.height) : 3.5;
   const fontFamily = cs?.fontName || 'sans-serif';
@@ -104,28 +127,47 @@ export function renderLineSegEl(
   const fontWeight = cs?.bold ? 'bold' : 'normal';
   const fontStyle = cs?.italic ? 'italic' : 'normal';
 
-  const leftMargin = paraShape && paraShape.leftMargin > 0 ? hu2mm(paraShape.leftMargin) : 0;
+  // X position: use horzpos if available (encodes leftMargin from HWP layout)
+  const horzpos = intAttr(seg, 'horzpos', 0);
+  const horzsize = intAttr(seg, 'horzsize', 0);
+  const isLastSeg = segIdx === allSegs.length - 1;
 
   let textAnchor = 'start';
-  let x = contentLeft + leftMargin;
+  // horzpos encodes the line's actual start (includes leftMargin). If zero, fall back to leftMargin.
+  let x = contentLeft;
+  if (horzpos > 0) {
+    x = contentLeft + hu2mm(horzpos);
+  } else if (paraShape && paraShape.leftMargin > 0) {
+    x = contentLeft + hu2mm(paraShape.leftMargin);
+  }
   if (paraShape) {
     const align = paraShape.alignment;
     if (align === 3) { textAnchor = 'middle'; x = contentLeft + contentWidth / 2; }
     else if (align === 2) { textAnchor = 'end'; x = contentLeft + contentWidth; }
   }
 
+  // Use vertpos for absolute Y positioning within the content area
+  const vertpos = intAttr(seg, 'vertpos', 0);
   const baseline = intAttr(seg, 'baseline', 0);
-  const baselineY = yPos + hu2mm(baseline);
+  const baselineY = contentTop + hu2mm(vertpos) + hu2mm(baseline);
 
-  if (runs.length > 1) {
-    const tspans = renderRunsAsTspans(runs, caches);
+  // JUSTIFY: stretch non-last lines to fill horzsize using SVG textLength
+  let textLengthAttr = '';
+  const isJustify = !paraShape || paraShape.alignment === 0; // 0 = JUSTIFY (default)
+  if (isJustify && !isLastSeg && horzsize > 0 && lineText.trim().length > 1) {
+    const horzMm = hu2mm(horzsize);
+    textLengthAttr = ` textLength="${horzMm.toFixed(2)}" lengthAdjust="spacing"`;
+  }
+
+  if (lineRuns.length > 1) {
+    const tspans = renderRunsAsTspans(lineRuns, caches);
     if (tspans) {
-      return `<text xml:space="preserve" x="${x.toFixed(2)}" y="${baselineY.toFixed(2)}" text-anchor="${textAnchor}">${tspans}</text>`;
+      return `<text xml:space="preserve" x="${x.toFixed(2)}" y="${baselineY.toFixed(2)}" text-anchor="${textAnchor}"${textLengthAttr}>${tspans}</text>`;
     }
   }
 
   const ls = letterSpacingAttr(cs);
-  return `<text xml:space="preserve" x="${x.toFixed(2)}" y="${baselineY.toFixed(2)}" font-size="${fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(fontFamily))}" fill="${color}" font-weight="${fontWeight}" font-style="${fontStyle}"${ls} text-anchor="${textAnchor}">${escapeXml(text)}</text>`;
+  return `<text xml:space="preserve" x="${x.toFixed(2)}" y="${baselineY.toFixed(2)}" font-size="${fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(fontFamily))}" fill="${color}" font-weight="${fontWeight}" font-style="${fontStyle}"${ls}${textLengthAttr} text-anchor="${textAnchor}">${escapeXml(lineText)}</text>`;
 }
 
 export function renderSimpleParagraph(
@@ -206,20 +248,22 @@ export function renderParagraphEl(
   } else if (lineSegs.length > 0) {
     for (let si = 0; si < lineSegs.length; si++) {
       const seg = lineSegs[si];
-      const segH = hu2mm(intAttr(seg, 'vertSize', 0));
+      const segH = hu2mm(intAttr(seg, 'vertsize', 0));
       if (segH === 0) continue;
 
-      if (yPos + segH > dims.pageBottom && pages[currentPage].length > 0) {
+      // Use absolute Y from vertpos so each line is correctly positioned
+      const segAbsY = dims.contentTop + hu2mm(intAttr(seg, 'vertpos', 0));
+
+      if (segAbsY + segH > dims.pageBottom && pages[currentPage].length > 0) {
         pages.push([]);
         currentPage = pages.length - 1;
-        yPos = dims.contentTop;
       }
 
-      const svg = renderLineSegEl(paraEl, seg, si, lineSegs, caches, dims.contentLeft, yPos, dims.contentWidth, paraShape);
+      const svg = renderLineSegEl(paraEl, seg, si, lineSegs, caches, dims.contentLeft, dims.contentTop, dims.contentWidth, paraShape);
       if (svg) {
-        pages[currentPage].push({ svg, y: yPos, height: segH });
+        pages[currentPage].push({ svg, y: segAbsY, height: segH });
       }
-      yPos += segH;
+      yPos = segAbsY + segH;
     }
   } else {
     // No line segs — render simple paragraph
