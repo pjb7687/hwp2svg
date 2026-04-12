@@ -1,0 +1,54 @@
+{
+  "name": "hwp-to-svg",
+  "version": "0.1.0",
+  "description": "Convert Korean HWP/HWPX (한글) documents to SVG — one SVG string per page",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "hwp2svg": "dist/cli/hwp2svg.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.cli.json",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "hwp",
+    "hwpx",
+    "hangeul",
+    "hangul",
+    "한글",
+    "svg",
+    "converter",
+    "korean",
+    "document",
+    "parser",
+    "renderer"
+  ],
+  "author": "Jeongbin Park",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pjb7687/hwp2svg.git"
+  },
+  "homepage": "https://github.com/pjb7687/hwp2svg",
+  "bugs": {
+    "url": "https://github.com/pjb7687/hwp2svg/issues"
+  },
+  "packageManager": "pnpm@10.28.1",
+  "dependencies": {
+    "@xmldom/xmldom": "^0.9.9",
+    "cfb": "^1.2.2",
+    "fake-indexeddb": "^6.2.5",
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "typescript": "^6.0.2"
+  }
+}
