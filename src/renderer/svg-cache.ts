@@ -31,19 +31,35 @@ export function parseAlign(el: Element, attrName: string, def: number): number {
 export function buildCaches(header: Document): Caches {
   const root = header.documentElement;
 
-  // Build font id → face map (converter uses <hh:fontface id="N" name="..."/>,
-  // real HWPX uses <hh:font> with face attribute)
-  const fontMap = new Map<string, string>();
-  for (const fontEl of findAll(root, 'fontface')) {
-    const id = attr(fontEl, 'id', '');
-    const face = attr(fontEl, 'name', '') || attr(fontEl, 'face', '');
-    if (id) fontMap.set(id, face);
+  // Build per-language font maps from HWPX native format:
+  // <hh:fontface lang="HANGUL"><hh:font id="N" face="..."/></hh:fontface>
+  // Also support legacy converter format: <hh:fontface id="N" name="..."/>
+  const langFontMaps = new Map<string, Map<string, string>>();
+  const legacyFontMap = new Map<string, string>();
+  for (const fontfaceEl of findAll(root, 'fontface')) {
+    const lang = attr(fontfaceEl, 'lang', '');
+    const legacyId = attr(fontfaceEl, 'id', '');
+    if (legacyId) {
+      // Legacy: <hh:fontface id="N" name="..."/>
+      const face = attr(fontfaceEl, 'name', '') || attr(fontfaceEl, 'face', '');
+      if (face) legacyFontMap.set(legacyId, face);
+    } else if (lang) {
+      // HWPX native: per-language font list
+      const langMap = new Map<string, string>();
+      for (const fontEl of children(fontfaceEl, 'font')) {
+        const fid = attr(fontEl, 'id', '');
+        const face = attr(fontEl, 'face', '') || attr(fontEl, 'name', '');
+        if (fid && face) langMap.set(fid, face);
+      }
+      langFontMaps.set(lang.toUpperCase(), langMap);
+    }
   }
-  // Also check <hh:font> elements (HWPX native format)
-  for (const fontEl of findAll(root, 'font')) {
-    const id = attr(fontEl, 'id', '');
-    const face = attr(fontEl, 'face', '') || attr(fontEl, 'name', '');
-    if (id && !fontMap.has(id)) fontMap.set(id, face);
+  // Helper: resolve font face by language and id
+  function resolveFontFace(lang: string, id: string): string {
+    const langMap = langFontMaps.get(lang.toUpperCase());
+    if (langMap && id && langMap.has(id)) return langMap.get(id)!;
+    if (legacyFontMap.has(id)) return legacyFontMap.get(id)!;
+    return 'sans-serif';
   }
 
   // Build charShape cache
@@ -54,10 +70,11 @@ export function buildCaches(header: Document): Caches {
 
     const height = intAttr(el, 'height', 1000);
     const textColor = attr(el, 'textColor', '#000000');
-    const boldVal = attr(el, 'bold', '0');
-    const bold = boldVal === '1' || boldVal === 'true';
-    const italicVal = attr(el, 'italic', '0');
-    const italic = italicVal === '1' || italicVal === 'true';
+    // Bold/italic: may be attribute (legacy) or child element (HWPX native: <hh:bold/>, <hh:italic/>)
+    const boldAttr = attr(el, 'bold', '');
+    const bold = boldAttr === '1' || boldAttr === 'true' || find(el, 'bold') !== null;
+    const italicAttr = attr(el, 'italic', '');
+    const italic = italicAttr === '1' || italicAttr === 'true' || find(el, 'italic') !== null;
 
     // Font: look for fontRef child with per-language IDs
     let fontName = 'sans-serif';
@@ -74,13 +91,13 @@ export function buildCaches(header: Document): Caches {
     if (fontRef) {
       const hangulId = attr(fontRef, 'hangul', '');
       const latinId = attr(fontRef, 'latin', '');
-      if (hangulId && fontMap.has(hangulId)) fontName = fontMap.get(hangulId)!;
-      if (latinId && fontMap.has(latinId)) fontNameLatin = fontMap.get(latinId)!;
+      if (hangulId) fontName = resolveFontFace('HANGUL', hangulId);
+      if (latinId) fontNameLatin = resolveFontFace('LATIN', latinId);
       else fontNameLatin = fontName;
     } else {
       const fontId = attr(el, 'fontId', '');
-      if (fontId && fontMap.has(fontId)) {
-        fontName = fontMap.get(fontId)!;
+      if (fontId) {
+        fontName = legacyFontMap.get(fontId) ?? 'sans-serif';
         fontNameLatin = fontName;
       }
     }
@@ -187,8 +204,22 @@ export function buildCaches(header: Document): Caches {
     const id = attr(el, 'id', '');
     if (!id) continue;
 
-    const fillColorStr = attr(el, 'fillColor', '');
-    const fillColor = fillColorStr ? fillColorStr : null;
+    // Legacy format: flat fillColor attribute
+    // HWPX native: <hc:fillBrush><hc:winBrush faceColor="#RRGGBB" .../></hc:fillBrush>
+    let fillColor: string | null = null;
+    const fillColorAttr = attr(el, 'fillColor', '');
+    if (fillColorAttr && fillColorAttr !== 'none') {
+      fillColor = fillColorAttr;
+    } else {
+      const fillBrush = find(el, 'fillBrush');
+      if (fillBrush) {
+        const winBrush = find(fillBrush, 'winBrush');
+        if (winBrush) {
+          const fc = attr(winBrush, 'faceColor', 'none');
+          if (fc && fc !== 'none') fillColor = fc;
+        }
+      }
+    }
 
     // Helper: read border side from child element (HWPX) or flat attribute (HWP converter)
     function borderSide(side: string): { type: string; width: string; color: string } {

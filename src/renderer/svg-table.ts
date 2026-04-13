@@ -217,7 +217,8 @@ function emitLine(
   spec: BSpec,
 ): void {
   const isH = y1 === y2; // horizontal line (y constant)
-  if (spec.type.toUpperCase() === 'DOUBLE') {
+  const typeUpper = spec.type.toUpperCase();
+  if (typeUpper === 'DOUBLE' || typeUpper === 'DOUBLE_SLIM') {
     // Each line W/3 thick, gap = W, centers at ±2W/3; total span = 5W/3
     const lineW  = spec.width / 3;
     const offset = spec.width * 2 / 3;
@@ -402,10 +403,16 @@ export function adjustRowHeights(
       }
       if (linesegContentH === 0) continue;
 
-      // Cell margins
+      // Cell margins — 0xFFFFFFFF (4294967295) is HWP "use default" sentinel → treat as 141 HU
+      const HWP_DEFAULT_MARGIN = 141;
+      const HWP_SENTINEL = 4294967295;
       const marginEl = findChild(cellEl, 'cellMargin');
-      const cellMTop = marginEl ? hu2mm(intAttr(marginEl, 'top', 141)) : hu2mm(intAttr(cellEl, 'marginTop', 141));
-      const cellMBottom = marginEl ? hu2mm(intAttr(marginEl, 'bottom', 141)) : hu2mm(intAttr(cellEl, 'marginBottom', 141));
+      function readMarginVal(el: Element | null, fallbackEl: Element, attr1: string, attr2: string): number {
+        const raw = el ? intAttr(el, attr1, HWP_SENTINEL) : intAttr(fallbackEl, attr2, HWP_SENTINEL);
+        return raw === HWP_SENTINEL ? HWP_DEFAULT_MARGIN : raw;
+      }
+      const cellMTop = hu2mm(readMarginVal(marginEl, cellEl, 'top', 'marginTop'));
+      const cellMBottom = hu2mm(readMarginVal(marginEl, cellEl, 'bottom', 'marginBottom'));
 
       const neededH = cellMTop + hu2mm(linesegContentH) + cellMBottom;
       const currentH = rowHeights.get(rowAddr) ?? 0;
@@ -446,10 +453,17 @@ export function renderCellContent(
   const parts: string[] = [];
 
   // Cell margins (child element or flat attributes)
+  // 0xFFFFFFFF (4294967295) is HWP "use default" sentinel → treat as 141 HU
+  const HWP_MARGIN_SENTINEL = 4294967295;
+  const HWP_DEFAULT_CELL_MARGIN = 141;
   const marginEl = findChild(cellEl, 'cellMargin');
-  const mLeft = marginEl ? hu2mm(intAttr(marginEl, 'left', 141)) : hu2mm(intAttr(cellEl, 'marginLeft', 141));
-  const mRight = marginEl ? hu2mm(intAttr(marginEl, 'right', 141)) : hu2mm(intAttr(cellEl, 'marginRight', 141));
-  const mTop = marginEl ? hu2mm(intAttr(marginEl, 'top', 141)) : hu2mm(intAttr(cellEl, 'marginTop', 141));
+  function readCellMarginVal(side: string): number {
+    const raw = marginEl ? intAttr(marginEl, side, HWP_MARGIN_SENTINEL) : intAttr(cellEl, `margin${side.charAt(0).toUpperCase() + side.slice(1)}`, HWP_MARGIN_SENTINEL);
+    return raw === HWP_MARGIN_SENTINEL ? HWP_DEFAULT_CELL_MARGIN : raw;
+  }
+  const mLeft = hu2mm(readCellMarginVal('left'));
+  const mRight = hu2mm(readCellMarginVal('right'));
+  const mTop = hu2mm(readCellMarginVal('top'));
 
   const textX = x + mLeft;
   const textWidth = cellW - mLeft - mRight;
@@ -466,7 +480,7 @@ export function renderCellContent(
   const cellSqueeze = cellLineWrap === 'SQUEEZE' || cellLineWrap === 'FIXED';
 
   // Cell bottom margin
-  const mBottom = marginEl ? hu2mm(intAttr(marginEl, 'bottom', 141)) : hu2mm(intAttr(cellEl, 'marginBottom', 141));
+  const mBottom = hu2mm(readCellMarginVal('bottom'));
 
   // First pass: compute total content height for vertical centering
   interface RunSegment {
