@@ -818,8 +818,8 @@ export function renderCellContent(
     }
     isFirstRenderedLine = false;
     let textLengthAttr = '';
+    const lineText = line.segments.map(s => s.text).join('');
     if (line.horzsizeMm !== undefined && line.horzsizeMm > 0) {
-      const lineText = line.segments.map(s => s.text).join('');
       // HWP never scales glyph widths at line level — only adjusts inter-character spacing (자간).
       // horzsize is the pre-calculated target width from HWP's layout engine.
       // JUSTIFY (align=0): non-last lines fill horzsize exactly via spacing.
@@ -828,14 +828,6 @@ export function renderCellContent(
       if (((line.justify && !line.isLastLine) || line.distribute) && lineText.trim().length > 1) {
         const targetWidth = Math.min(line.horzsizeMm, textWidth);
         textLengthAttr = ` textLength="${targetWidth.toFixed(2)}" lengthAdjust="spacing"`;
-      } else if (line.squeeze && lineText.trim().length > 1) {
-        // 한 줄로 입력 (Squeeze): compress character spacing only when text would overflow.
-        // HWP stores horzsize = available line width (not the actual text width), so we can't
-        // use horzsizeMm to detect overflow — always estimate instead.
-        const est = estimateTextWidth(lineText, line.fontSize);
-        if (est > textWidth) {
-          textLengthAttr = ` textLength="${textWidth.toFixed(2)}" lengthAdjust="spacing"`;
-        }
       } else if (line.anchor === 'end' && line.horzposMm !== undefined && lineText.trim().length > 1) {
         // RIGHT-aligned: force text to exactly fill horzsize so left edge lands at textX+horzpos.
         // Without this, natural font rendering may place the left edge slightly off.
@@ -843,6 +835,14 @@ export function renderCellContent(
         if (targetWidth > 0) {
           textLengthAttr = ` textLength="${targetWidth.toFixed(2)}" lengthAdjust="spacing"`;
         }
+      }
+    }
+    if (!textLengthAttr && line.squeeze && lineText.trim().length > 1) {
+      // 한 줄로 입력 (Squeeze): compress character spacing only when text would overflow.
+      // Apply regardless of whether lineseg horzsize data is present.
+      const est = estimateTextWidth(lineText, line.fontSize);
+      if (est > textWidth) {
+        textLengthAttr = ` textLength="${textWidth.toFixed(2)}" lengthAdjust="spacing"`;
       }
     }
     // horzpos = left edge of text segment (column-local, spec: "컬럼에서의 시작 위치").
@@ -862,9 +862,15 @@ export function renderCellContent(
       // SVG's negative letter-spacing adds trailing space AFTER the last glyph's advance,
       // which shifts the glyph visually past the anchor point. textLength already handles spacing.
       const lsAttr = (textLengthAttr && line.anchor === 'end') ? '' : seg.ls;
-      parts.push(`<text xml:space="preserve" x="${lineTx.toFixed(2)}" y="${textY.toFixed(2)}" font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${lsAttr}${textLengthAttr} text-anchor="${line.anchor}">${escapeXml(seg.text)}</text>`);
+      // For right-aligned text, trailing spaces shift visible text left — trim them.
+      const segText = line.anchor === 'end' ? seg.text.trimEnd() : seg.text;
+      parts.push(`<text xml:space="preserve" x="${lineTx.toFixed(2)}" y="${textY.toFixed(2)}" font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${lsAttr}${textLengthAttr} text-anchor="${line.anchor}">${escapeXml(segText)}</text>`);
     } else {
-      const tspans = line.segments.map(seg =>
+      // For right-aligned text, trailing spaces in the last segment shift visible text left — trim them.
+      const segs = line.anchor === 'end'
+        ? line.segments.map((seg, i) => i === line.segments.length - 1 ? { ...seg, text: seg.text.trimEnd() } : seg)
+        : line.segments;
+      const tspans = segs.map(seg =>
         `<tspan font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${seg.ls}>${escapeXml(seg.text)}</tspan>`
       ).join('');
       parts.push(`<text xml:space="preserve" x="${lineTx.toFixed(2)}" y="${textY.toFixed(2)}"${textLengthAttr} text-anchor="${line.anchor}">${tspans}</text>`);

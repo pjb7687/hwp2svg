@@ -180,7 +180,10 @@ export function buildCaches(header: Document): Caches {
     }
 
     // 한 줄로 입력 (LineWrap): 'Squeeze' = adjust spacing to fit single line; 'FIXED' (binary bit=1) also maps here
-    const lineWrapRaw = attr(el, 'lineWrap', attr(el, 'LineWrap', ''));
+    // Legacy/HWP converter: lineWrap is a flat attribute on paraPr
+    // HWPX native: lineWrap is on the <hh:breakSetting> child element
+    const breakSettingEl = find(el, 'breakSetting');
+    const lineWrapRaw = attr(el, 'lineWrap', '') || attr(el, 'LineWrap', '') || (breakSettingEl ? attr(breakSettingEl, 'lineWrap', '') : '');
     const lineWrap = lineWrapRaw ? lineWrapRaw.toUpperCase() : undefined;
 
     paraShapes.set(id, {
