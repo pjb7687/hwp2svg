@@ -8,6 +8,7 @@ import {
   isCJK, fontForChar, spacingForChar, fontFamilyWithFallback, wrapText, estimateTextWidth,
 } from './svg-utils.js';
 import { findDirectTables, renderTableEl, renderTableWithPageBreaks } from './svg-table.js';
+import { mapPuaStringToUnicode } from '../hwp/hwp-section.js';
 
 export interface RunInfo {
   text: string;
@@ -66,7 +67,7 @@ export function renderRunsAsTspans(runs: RunInfo[], caches: Caches): string {
         if (isCJK(run.text[end]) !== cjk) break;
         end++;
       }
-      const segText = run.text.substring(i, end);
+      const segText = mapPuaStringToUnicode(run.text.substring(i, end));
       const sampleCh = segText.trim()[0] || segText[0] || '';
       const fs = cs ? hu2mm(cs.height) : 3.5;
       const ff = cs ? fontForChar(cs, sampleCh) : 'sans-serif';
@@ -167,7 +168,7 @@ export function renderLineSegEl(
   }
 
   const ls = letterSpacingAttr(cs);
-  return `<text xml:space="preserve" x="${x.toFixed(2)}" y="${baselineY.toFixed(2)}" font-size="${fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(fontFamily))}" fill="${color}" font-weight="${fontWeight}" font-style="${fontStyle}"${ls}${textLengthAttr} text-anchor="${textAnchor}">${escapeXml(lineText)}</text>`;
+  return `<text xml:space="preserve" x="${x.toFixed(2)}" y="${baselineY.toFixed(2)}" font-size="${fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(fontFamily))}" fill="${color}" font-weight="${fontWeight}" font-style="${fontStyle}"${ls}${textLengthAttr} text-anchor="${textAnchor}">${escapeXml(mapPuaStringToUnicode(lineText))}</text>`;
 }
 
 export function renderSimpleParagraph(
@@ -207,7 +208,7 @@ export function renderSimpleParagraph(
   }
 
   const ls = letterSpacingAttr(cs);
-  return `<text xml:space="preserve" x="${x.toFixed(2)}" y="${y.toFixed(2)}" font-size="${fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(fontFamily))}" fill="${color}" font-weight="${fontWeight}" font-style="${fontStyle}"${ls} text-anchor="${textAnchor}">${escapeXml(text)}</text>`;
+  return `<text xml:space="preserve" x="${x.toFixed(2)}" y="${y.toFixed(2)}" font-size="${fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(fontFamily))}" fill="${color}" font-weight="${fontWeight}" font-style="${fontStyle}"${ls} text-anchor="${textAnchor}">${escapeXml(mapPuaStringToUnicode(text))}</text>`;
 }
 
 export function renderParagraphEl(
