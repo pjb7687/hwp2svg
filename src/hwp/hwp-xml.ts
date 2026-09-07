@@ -2,7 +2,7 @@
  * XML generation: header.xml, section XML, manifest, version.xml.
  */
 
-import type { DocInfoData, PageDefInfo, ParaInfo, TextRunInfo, TableControlInfo, CellInfo, DocHeader, SectionDefInfo, FootnoteShapeInfo, PageBorderFillInfo, ColDefInfo, PageNumInfo, HeaderFooterInfo, FieldBeginControlInfo, FieldEndControlInfo, BorderFillInfo } from './hwp-types.js';
+import type { DocInfoData, PageDefInfo, ParaInfo, TextRunInfo, TableControlInfo, CellInfo, DocHeader, SectionDefInfo, FootnoteShapeInfo, PageBorderFillInfo, ColDefInfo, PageNumInfo, HeaderFooterInfo, FieldBeginControlInfo, FieldEndControlInfo, BorderFillInfo, PicControlInfo, RectControlInfo } from './hwp-types.js';
 import { BORDER_WIDTHS } from './hwp-docinfo.js';
 
 // ── XML Namespaces ──
@@ -136,6 +136,35 @@ function generateBorderFillXml(bf: BorderFillInfo, indent: string): string {
     const bc = bf.fillBackColor !== null ? colorrefToHexWithAlpha(bf.fillBackColor) : 'none';
     lines.push(`${i2}<hc:fillBrush>`);
     lines.push(`${i2}  <hc:winBrush faceColor="${fc}" hatchColor="${bc}" alpha="0"/>`);
+    lines.push(`${i2}</hc:fillBrush>`);
+  } else if (bf.imageBinDataId) {
+    // HWP image fill (표 28, bit 1). Encode as <hc:imgBrush> so the renderer
+    // can look up the BinData and paint the cell background with the image.
+    const modeMap: Record<number, string> = {
+      0: 'TILE_ALL', 1: 'TILE_HORIZONTAL_TOP', 2: 'TILE_HORIZONTAL_BOTTOM',
+      3: 'TILE_VERTICAL_LEFT', 4: 'TILE_VERTICAL_RIGHT', 5: 'RESIZE',
+      6: 'CENTER', 7: 'CENTER_TOP', 8: 'CENTER_BOTTOM',
+      9: 'LEFT_MIDDLE', 10: 'LEFT_TOP', 11: 'LEFT_BOTTOM',
+      12: 'RIGHT_MIDDLE', 13: 'RIGHT_TOP', 14: 'RIGHT_BOTTOM', 15: 'NONE',
+    };
+    const mode = modeMap[bf.imageFillType ?? 5] ?? 'RESIZE';
+    lines.push(`${i2}<hc:fillBrush>`);
+    lines.push(`${i2}  <hc:imgBrush mode="${mode}">`);
+    lines.push(`${i2}    <hc:image binaryItemIDRef="${bf.imageBinDataId}"/>`);
+    lines.push(`${i2}  </hc:imgBrush>`);
+    lines.push(`${i2}</hc:fillBrush>`);
+  } else if (bf.gradientColors && bf.gradientColors.length > 0) {
+    // HWP gradient fill (표 28). Serialize stops as <hc:color> children of
+    // <hc:gradation>. Type 1=LINEAR (angle), 2=RADIAL (centerX/centerY),
+    // 3=CONICAL, 4=RECTANGULAR — the renderer only needs colors + angle.
+    const typeMap: Record<number, string> = { 1: 'LINEAR', 2: 'RADIAL', 3: 'CONICAL', 4: 'SQUARE' };
+    const typeStr = typeMap[bf.gradientType ?? 1] ?? 'LINEAR';
+    lines.push(`${i2}<hc:fillBrush>`);
+    lines.push(`${i2}  <hc:gradation type="${typeStr}" angle="${bf.gradientAngle ?? 0}" centerX="0" centerY="0" step="0" colorNum="${bf.gradientColors.length}">`);
+    for (const c of bf.gradientColors) {
+      lines.push(`${i2}    <hc:color value="${colorrefToHexOrNone(c)}"/>`);
+    }
+    lines.push(`${i2}  </hc:gradation>`);
     lines.push(`${i2}</hc:fillBrush>`);
   }
 
@@ -506,6 +535,20 @@ function generateParaXml(para: ParaInfo, indent: string): string {
         } else {
           lines.push(`${ind3}<hp:t/>`);
         }
+      } else if (ctrl.type === 'pic') {
+        lines.push(generatePicXml(ctrl as PicControlInfo, ind3));
+        if (embeddedText) {
+          lines.push(`${ind3}<hp:t>${escapeXml(embeddedText)}</hp:t>`);
+        } else {
+          lines.push(`${ind3}<hp:t/>`);
+        }
+      } else if (ctrl.type === 'rect') {
+        lines.push(generateRectXml(ctrl as RectControlInfo, ind3));
+        if (embeddedText) {
+          lines.push(`${ind3}<hp:t>${escapeXml(embeddedText)}</hp:t>`);
+        } else {
+          lines.push(`${ind3}<hp:t/>`);
+        }
       }
       lines.push(`${ind2}</hp:run>`);
       lastRunCharPrId = charPrId;
@@ -545,6 +588,12 @@ function generateParaXml(para: ParaInfo, indent: string): string {
           } else {
             lines.push(`${ind3}<hp:t/>`);
           }
+        } else if (ctrl.type === 'pic') {
+          lines.push(generatePicXml(ctrl as PicControlInfo, ind3));
+          lines.push(`${ind3}<hp:t/>`);
+        } else if (ctrl.type === 'rect') {
+          lines.push(generateRectXml(ctrl as RectControlInfo, ind3));
+          lines.push(`${ind3}<hp:t/>`);
         }
       }
       lines.push(`${ind2}</hp:run>`);
@@ -883,6 +932,71 @@ const CELL_VERT_ALIGN_MAP: Record<number, string> = { 0: 'TOP', 1: 'CENTER', 2: 
 const HORZ_ALIGN_MAP: Record<number, string> = { 0: 'LEFT', 1: 'CENTER', 2: 'RIGHT' };
 // pageBreak binary value → HWPML string (0=NONE, 2=CELL)
 const PAGE_BREAK_MAP: Record<number, string> = { 0: 'NONE', 1: 'PAGE', 2: 'CELL', 3: 'COLUMN' };
+
+/** Emit an <hp:rect> element for a rectangle shape (with optional solid or
+ *  gradient fill). The renderer maps this to an SVG <rect> and, for gradient
+ *  fills, adds a <linearGradient> in <defs>. */
+function generateRectXml(rect: RectControlInfo, indent: string): string {
+  const attrs = [
+    `id="${rect.instanceId}"`,
+    `zOrder="${rect.zOrder}"`,
+    `width="${rect.ctrlWidth}"`,
+    `height="${rect.ctrlHeight}"`,
+    `xOffset="${rect.xOffset}"`,
+    `yOffset="${rect.yOffset}"`,
+    `treatAsChar="${rect.treatAsChar ? '1' : '0'}"`,
+    `flowWithText="${rect.flowWithText ? '1' : '0'}"`,
+    `fillKind="${rect.fill.kind}"`,
+  ];
+  if (rect.fill.kind === 'solid' && rect.fill.color) {
+    attrs.push(`fillColor="${rect.fill.color}"`);
+  } else if (rect.fill.kind === 'gradient') {
+    attrs.push(`gradientType="${rect.fill.gradientType ?? 1}"`);
+    attrs.push(`gradientAngle="${rect.fill.gradientAngle ?? 0}"`);
+    attrs.push(`gradientColors="${(rect.fill.gradientColors ?? []).join(',')}"`);
+  }
+  if (!rect.paragraphs || rect.paragraphs.length === 0) {
+    return `${indent}<hp:rect ${attrs.join(' ')}/>`;
+  }
+  const ind2 = indent + '  ';
+  const ind3 = ind2 + '  ';
+  const lines: string[] = [];
+  lines.push(`${indent}<hp:rect ${attrs.join(' ')}>`);
+  lines.push(
+    `${ind2}<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" ` +
+    `linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">`
+  );
+  for (const para of rect.paragraphs) {
+    lines.push(generateParaXml(para, ind3));
+  }
+  lines.push(`${ind2}</hp:subList>`);
+  lines.push(`${indent}</hp:rect>`);
+  return lines.join('\n');
+}
+
+/** Emit an <hp:pic> element for an embedded picture. Carries just enough info
+ *  (position, size, binData reference) for the SVG renderer to place an
+ *  <image href="data:image/..;base64,.."/> at the right spot. */
+function generatePicXml(pic: PicControlInfo, indent: string): string {
+  const attrs = [
+    `id="${pic.instanceId}"`,
+    `zOrder="${pic.zOrder}"`,
+    `numberingType="PICTURE"`,
+    `textWrap="${TEXT_WRAP_MAP[pic.textWrap] ?? 'TOP_AND_BOTTOM'}"`,
+    `textFlow="${TEXT_FLOW_MAP[pic.textFlow] ?? 'BOTH_SIDES'}"`,
+    `lock="0"`,
+    // Positional attrs — the renderer treats a pic like a small inline block
+    // occupying (ctrlWidth, ctrlHeight) at the current text position.
+    `width="${pic.ctrlWidth}"`,
+    `height="${pic.ctrlHeight}"`,
+    `xOffset="${pic.xOffset}"`,
+    `yOffset="${pic.yOffset}"`,
+    `binaryItemIDRef="${pic.binDataId}"`,
+    `treatAsChar="${pic.treatAsChar ? '1' : '0'}"`,
+    `flowWithText="${pic.flowWithText ? '1' : '0'}"`,
+  ];
+  return `${indent}<hp:pic ${attrs.join(' ')}/>`;
+}
 
 function generateTableXml(table: TableControlInfo, indent: string): string[] {
   const lines: string[] = [];

@@ -6,7 +6,7 @@ import { parseRecords, dataView, type HwpRecord } from './record.js';
 import * as TAG from './constants.js';
 import type {
   PageDefInfo, TextRunInfo, LineSegInfo, ParaInfo, ControlInfo,
-  TableControlInfo, CellInfo, SectionDefInfo, FootnoteShapeInfo, PageBorderFillInfo,
+  TableControlInfo, CellInfo, SectionDefInfo, FootnoteShapeInfo, PageBorderFillInfo, PicControlInfo, RectControlInfo, RectFillInfo,
   ColDefInfo, PageNumInfo, HeaderFooterInfo, FieldBeginControlInfo, FieldEndControlInfo,
 } from './hwp-types.js';
 
@@ -28,6 +28,66 @@ const PUA_TO_UNICODE: Record<number, number> = {
   0xF074: 0x25AA, 0xF075: 0x25AB, 0xF076: 0x25A1, 0xF0FE: 0x2611,
   0xF0FD: 0x2612,
 };
+
+/** Convert HWP's COLORREF (0x00BBGGRR little-endian in memory, read as
+ *  UINT32 little-endian gives 0x00BBGGRR) to a "#RRGGBB" hex string. */
+function colorRefToHex(colorref: number): string {
+  const r = colorref & 0xFF;
+  const g = (colorref >> 8) & 0xFF;
+  const b = (colorref >> 16) & 0xFF;
+  return `#${r.toString(16).padStart(2, '0').toUpperCase()}${g.toString(16).padStart(2, '0').toUpperCase()}${b.toString(16).padStart(2, '0').toUpperCase()}`;
+}
+
+/** Parse the 채우기 정보 (Fill Info, HWP 5.0 spec 표 28) starting at `off`.
+ *  Returns { kind, color, gradientType, gradientAngle, gradientColors } — only
+ *  the fields relevant to the selected kind are populated. */
+function parseFillInfo(data: Uint8Array, off: number): RectFillInfo {
+  const dv = dataView(data);
+  if (off + 4 > data.length) return { kind: 'none' };
+  const type = dv.getUint32(off, true);
+  let pos = off + 4;
+  const has_solid    = (type & 0x1) !== 0;
+  const has_image    = (type & 0x2) !== 0;
+  const has_gradient = (type & 0x4) !== 0;
+
+  let solidColor: string | undefined;
+  if (has_solid && pos + 12 <= data.length) {
+    solidColor = colorRefToHex(dv.getUint32(pos, true)); // background
+    pos += 12; // COLORREF bg + COLORREF pattern + INT32 pattern type
+  }
+
+  let gradientType: number | undefined;
+  let gradientAngle: number | undefined;
+  let gradientColors: string[] | undefined;
+  // Layout (per hwp5 pyhwp): BYTE type, UINT32 shear, UINT32 x, UINT32 y,
+  // UINT32 blur, UINT32 count, [UINT32 stops[count] if count>2], COLORREF colors[count]
+  if (has_gradient && pos + 21 <= data.length) {
+    gradientType = data[pos]; pos += 1;
+    gradientAngle = dv.getUint32(pos, true); pos += 4;
+    /* centerX */ pos += 4;
+    /* centerY */ pos += 4;
+    /* blur    */ pos += 4;
+    const numColors = dv.getUint32(pos, true); pos += 4;
+    if (numColors > 2 && pos + 4 * numColors <= data.length) {
+      pos += 4 * numColors; // color-stop positions when > 2
+    }
+    gradientColors = [];
+    for (let c = 0; c < numColors && pos + 4 <= data.length; c++) {
+      gradientColors.push(colorRefToHex(dv.getUint32(pos, true)));
+      pos += 4;
+    }
+  }
+
+  if (has_gradient && gradientColors && gradientColors.length > 0) {
+    return { kind: 'gradient', gradientType, gradientAngle, gradientColors };
+  }
+  if (has_solid && solidColor) {
+    return { kind: 'solid', color: solidColor };
+  }
+  // Image and no-fill fall through to "none" for now.
+  void has_image;
+  return { kind: 'none' };
+}
 
 export function mapPuaToUnicode(ch: number): number {
   if (ch >= 0xE000 && ch <= 0xF8FF) {
@@ -728,6 +788,135 @@ export function parseControl(
     return [fieldBegin, i];
   }
 
+  // General Shape Object ('gso '). Wraps all drawing shapes: rectangles,
+  // lines, ellipses, pictures, etc. The specific shape kind is stored inside
+  // the first HWPTAG_SHAPE_COMPONENT sub-record (its own ctrlId field). We
+  // only care about pictures for now — everything else we skip.
+  if (ctrlId === 'gso ') {
+    const ctrlData = records[ctrlHeaderIdx].data;
+    const ctrlDv = dataView(ctrlData);
+    const ctrlAttrs = ctrlData.length >= 8 ? ctrlDv.getUint32(4, true) : 0;
+    const treatAsChar = (ctrlAttrs & 1) !== 0;
+    const affectLSpacing = ((ctrlAttrs >> 2) & 1) !== 0;
+    const vertRelTo = (ctrlAttrs >> 3) & 0x3;
+    const vertAlignPos = (ctrlAttrs >> 5) & 0x7;
+    const horzRelTo = (ctrlAttrs >> 8) & 0x3;
+    const horzAlignPos = (ctrlAttrs >> 10) & 0x7;
+    const flowWithText = ((ctrlAttrs >> 13) & 1) !== 0;
+    const textWrap = (ctrlAttrs >> 21) & 0x7;
+    const textFlow = (ctrlAttrs >> 24) & 0x3;
+    const yOffset = ctrlData.length >= 12 ? ctrlDv.getInt32(8, true) : 0;
+    const xOffset = ctrlData.length >= 16 ? ctrlDv.getInt32(12, true) : 0;
+    const ctrlWidth = ctrlData.length >= 20 ? ctrlDv.getUint32(16, true) : 0;
+    const ctrlHeight = ctrlData.length >= 24 ? ctrlDv.getUint32(20, true) : 0;
+    const zOrder = ctrlData.length >= 28 ? ctrlDv.getInt32(24, true) : 0;
+    const outMarginLeft = ctrlData.length >= 30 ? ctrlDv.getUint16(28, true) : 0;
+    const outMarginRight = ctrlData.length >= 32 ? ctrlDv.getUint16(30, true) : 0;
+    const outMarginTop = ctrlData.length >= 34 ? ctrlDv.getUint16(32, true) : 0;
+    const outMarginBottom = ctrlData.length >= 36 ? ctrlDv.getUint16(34, true) : 0;
+    const instanceId = ctrlData.length >= 40 ? ctrlDv.getUint32(36, true) : 0;
+
+    let shapeKind = '';    // '$pic', '$rec', '$lin', …
+    let binDataId = 0;
+    let cropLeft = 0, cropTop = 0, cropRight = 0, cropBottom = 0;
+    let rectFill: RectFillInfo = { kind: 'none' };
+    let rectBorderColor = '#000000';
+    let rectBorderWidth = 0;
+    // Paragraphs inside the shape's text box (if any). HWP encodes them as
+    // PARA_HEADER + PARA_TEXT + ... records at a deeper level than the
+    // SHAPE_COMPONENT itself, wrapped by a LIST_HEADER.
+    const shapeParas: ParaInfo[] = [];
+
+    while (i < records.length && records[i].level > ctrlLevel) {
+      const rec = records[i];
+      // Text box paragraphs — recognize PARA_HEADER records inside the shape.
+      if (rec.tagId === TAG.HWPTAG_PARA_HEADER) {
+        const [para, nextI] = parseParagraph(records, i);
+        shapeParas.push(para);
+        i = nextI;
+        continue;
+      }
+      if (rec.tagId === TAG.HWPTAG_SHAPE_COMPONENT && rec.data.length >= 4 && !shapeKind) {
+        // First HWPTAG_SHAPE_COMPONENT holds the shape kind at offset 0-3
+        // (or 4-7 when the record starts with a parent chid prefix). If chid
+        // at offset 4-7 is a valid shape id ($rec/$lin/…), use that; else
+        // fall back to offset 0-3.
+        const b = rec.data;
+        const chid0 = String.fromCharCode(b[3], b[2], b[1], b[0]);
+        const chid1 = b.length >= 8
+          ? String.fromCharCode(b[7], b[6], b[5], b[4])
+          : '';
+        shapeKind = (/^\$[a-z]{3}$/.test(chid1) ? chid1 : chid0);
+
+        // For $rec, parse the trailing BorderLine + Fill Info per spec 표 81.
+        // 개체 요소 공통 속성 base = 8 (chid0+chid) + 42 (표 83 base) = 50 bytes.
+        // Rendering info (표 84) = 2 (cnt) + 48 (translation) + cnt * 96
+        //                       (scale + rotation matrices).
+        if (shapeKind === '$rec' && b.length >= 52) {
+          const rdv = dataView(b);
+          const renderStart = 50;
+          const srCount = rdv.getUint16(renderStart, true);
+          const renderLen = 2 + 48 + srCount * 96;
+          const borderStart = renderStart + renderLen;
+          // BorderLine (표 86): COLORREF (4) + INT16 (2) + UINT32 (4) + BYTE (1) = 11
+          if (b.length >= borderStart + 11) {
+            const bcolor = rdv.getUint32(borderStart, true);
+            rectBorderColor = colorRefToHex(bcolor);
+            rectBorderWidth = rdv.getInt16(borderStart + 4, true);
+            const fillStart = borderStart + 11;
+            rectFill = parseFillInfo(b, fillStart);
+          }
+        }
+      }
+      if (rec.tagId === TAG.HWPTAG_SHAPE_COMPONENT_PICTURE && rec.data.length >= 73) {
+        // HWPTAG_SHAPE_COMPONENT_PICTURE (표 102 그림 개체 속성):
+        //   offset  0-11: BorderLine  { COLORREF color; INT32 width; UINT32 flags; }
+        //   offset 12-43: ImageRect   { Coord p0..p3; }  Coord = { SHWPUNIT x; SHWPUNIT y; }
+        //   offset 44-59: ImageClip   { SHWPUNIT left, top, right, bottom; }  (자르기)
+        //   offset 60-67: Margin      { HWPUNIT16 left, right, top, bottom; } (여백)
+        //   offset 68-72: PictureInfo { INT8 brightness; INT8 contrast; BYTE effect; UINT16 bindataID; }
+        // (optional trailing fields exist for versions ≥ 5.0.2.2)
+        const pdv = dataView(rec.data);
+        cropLeft   = pdv.getInt32(44, true);
+        cropTop    = pdv.getInt32(48, true);
+        cropRight  = pdv.getInt32(52, true);
+        cropBottom = pdv.getInt32(56, true);
+        binDataId  = pdv.getUint16(71, true);
+      }
+      i++;
+    }
+
+    if (shapeKind === '$rec') {
+      const rect: RectControlInfo = {
+        type: 'rect',
+        instanceId,
+        ctrlWidth, ctrlHeight, xOffset, yOffset,
+        outMarginLeft, outMarginRight, outMarginTop, outMarginBottom,
+        zOrder, textWrap, textFlow, treatAsChar, affectLSpacing, flowWithText,
+        vertRelTo, vertAlignPos, horzRelTo, horzAlignPos,
+        fill: rectFill,
+        borderColor: rectBorderColor,
+        borderWidth: rectBorderWidth,
+        paragraphs: shapeParas.length > 0 ? shapeParas : undefined,
+      };
+      return [rect, i];
+    }
+
+    // Other shape kinds (lines, ellipses, containers…) are dropped for now.
+    if (shapeKind !== '$pic') return [null, i];
+
+    const pic: PicControlInfo = {
+      type: 'pic',
+      instanceId,
+      ctrlWidth, ctrlHeight, xOffset, yOffset,
+      outMarginLeft, outMarginRight, outMarginTop, outMarginBottom,
+      zOrder, textWrap, textFlow, treatAsChar, affectLSpacing, flowWithText,
+      vertRelTo, vertAlignPos, horzRelTo, horzAlignPos,
+      binDataId, cropLeft, cropTop, cropRight, cropBottom,
+    };
+    return [pic, i];
+  }
+
   // Skip all sub-records for unknown/unhandled controls
   while (i < records.length && records[i].level > ctrlLevel) {
     i++;
@@ -775,6 +964,24 @@ export function parseTableControl(
   }
   const rowSizesEnd = 18 + rowCount * 2;
   const borderFillId = rowSizesEnd + 2 <= rec.data.length ? dv.getUint16(rowSizesEnd, true) : 0;
+
+  // 표 75: Valid Zone Info Size + 영역 속성(표 78) array (5.0.1.0+). Each zone
+  // covers a rectangular cell range and overrides those cells' borderFillId.
+  // Used for HWP's "하나의 셀처럼 적용" (apply as one cell) fill option.
+  const zoneOff = rowSizesEnd + 2;
+  const zoneCount = zoneOff + 2 <= rec.data.length ? dv.getUint16(zoneOff, true) : 0;
+  const zones: { startCol: number; startRow: number; endCol: number; endRow: number; borderFillId: number; }[] = [];
+  for (let zi = 0; zi < zoneCount; zi++) {
+    const zo = zoneOff + 2 + zi * 10;
+    if (zo + 10 > rec.data.length) break;
+    zones.push({
+      startCol: dv.getUint16(zo, true),
+      startRow: dv.getUint16(zo + 2, true),
+      endCol: dv.getUint16(zo + 4, true),
+      endRow: dv.getUint16(zo + 6, true),
+      borderFillId: dv.getUint16(zo + 8, true),
+    });
+  }
 
   const table: TableControlInfo = {
     type: 'table',
@@ -828,6 +1035,19 @@ export function parseTableControl(
     }
   }
 
+  // Apply 영역 속성 (zone attrs) — a zone's borderFillId overrides the
+  // borderFillId of every cell in the (startCol..endCol, startRow..endRow)
+  // rectangle. HWP borderFillIds are 1-based; HWPX ids are 0-based, so a
+  // stored zoneBfId of N maps to HWPX id N-1 at emit time.
+  for (const zone of zones) {
+    for (const cell of table.cells) {
+      if (cell.colAddr >= zone.startCol && cell.colAddr <= zone.endCol &&
+          cell.rowAddr >= zone.startRow && cell.rowAddr <= zone.endRow) {
+        cell.borderFillId = zone.borderFillId;
+      }
+    }
+  }
+
   return [table, i];
 }
 
@@ -873,8 +1093,15 @@ export function parseTableCell(
     cell.rowAddr = dv.getUint16(10, true);
     cell.colSpan = dv.getUint16(12, true);
     cell.rowSpan = dv.getUint16(14, true);
-    cell.width = dv.getUint32(16, true);
-    cell.height = dv.getUint32(20, true);
+    // width/height are stored as HWPUNIT (32-bit). Some documents encode a
+    // negative height as a "shrink to content" sentinel; if we read that as
+    // unsigned we get values near 2^32 that blow up pagination. Read signed
+    // and clamp negatives to 0 so the row-height adjuster fills them in
+    // from paragraph metrics instead.
+    cell.width = dv.getInt32(16, true);
+    if (cell.width < 0) cell.width = 0;
+    cell.height = dv.getInt32(20, true);
+    if (cell.height < 0) cell.height = 0;
     cell.marginLeft = dv.getUint16(24, true);
     cell.marginRight = dv.getUint16(26, true);
     cell.marginTop = dv.getUint16(28, true);

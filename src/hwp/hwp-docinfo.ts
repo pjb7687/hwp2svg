@@ -243,12 +243,50 @@ export function parseBorderFill(data: Uint8Array, id: number): BorderFillInfo {
   if (data.length >= 36) {
     const fillOffset = 32;
     const fillType = dv.getUint32(fillOffset, true);
-    if ((fillType & 1) !== 0 && fillOffset + 12 <= data.length) {
-      info.fillColor = dv.getUint32(fillOffset + 4, true);
-      info.fillBackColor = dv.getUint32(fillOffset + 8, true);
-      if (fillOffset + 16 <= data.length) {
-        info.fillPatternType = dv.getInt32(fillOffset + 12, true);
+    let pos = fillOffset + 4;
+    if ((fillType & 1) !== 0 && pos + 12 <= data.length) {
+      info.fillColor = dv.getUint32(pos, true);
+      info.fillBackColor = dv.getUint32(pos + 4, true);
+      info.fillPatternType = dv.getInt32(pos + 8, true);
+      pos += 12;
+    }
+    // Image fill (표 28, bit 1). Layout: BYTE flags, INT8 brightness, INT8
+    // contrast, BYTE effect, UINT16 bindata_id.
+    if ((fillType & 2) !== 0 && pos + 6 <= data.length) {
+      info.imageFillType = data[pos]; pos += 1;
+      /* brightness */ pos += 1;
+      /* contrast   */ pos += 1;
+      /* effect     */ pos += 1;
+      info.imageBinDataId = dv.getUint16(pos, true);
+      pos += 2;
+    }
+    // Gradient fill (표 28, bit 2). Layout (from hwp5 pyhwp source):
+    //   BYTE   type   (1=LINEAR, 2=CIRCULAR, 3=CONICAL, 4=RECTANGULAR)
+    //   UINT32 shear  (angle in degrees)
+    //   UINT32 centerX
+    //   UINT32 centerY
+    //   UINT32 blur   (0-100)
+    //   UINT32 count
+    //   (if count > 2:) UINT32 stops[count]  -- spec says so, in practice sometimes omitted
+    //   COLORREF colors[count]
+    if ((fillType & 4) !== 0 && pos + 21 <= data.length) {
+      const gradType = data[pos]; pos += 1;
+      const gradAngle = dv.getUint32(pos, true); pos += 4;
+      pos += 4; // centerX
+      pos += 4; // centerY
+      pos += 4; // blur
+      const numColors = dv.getUint32(pos, true); pos += 4;
+      if (numColors > 2 && pos + 4 * numColors <= data.length) {
+        pos += 4 * numColors; // color-stop positions when > 2
       }
+      const colors: number[] = [];
+      for (let c = 0; c < numColors && pos + 4 <= data.length; c++) {
+        colors.push(dv.getUint32(pos, true));
+        pos += 4;
+      }
+      info.gradientType = gradType;
+      info.gradientAngle = gradAngle;
+      info.gradientColors = colors;
     }
   }
 

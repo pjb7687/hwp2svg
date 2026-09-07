@@ -109,17 +109,45 @@ async function extractBinData(
   cfb: CFB.CFB$Container,
   docId: string,
   binDataItems: Array<{ type: string; binDataId?: number; extension?: string }>,
+  isCompressed: boolean,
 ): Promise<void> {
   for (const item of binDataItems) {
     if (item.type === 'embedding' && item.binDataId !== undefined && item.extension) {
       const streamName = `BIN${item.binDataId.toString(16).toUpperCase().padStart(4, '0')}.${item.extension}`;
       const entry = CFB.find(cfb, `/BinData/${streamName}`);
-      if (entry) {
-        const data = new Uint8Array(entry.content as unknown as ArrayBuffer);
-        await fs.writeFile(docId, `BinData/${streamName}`, data);
+      if (!entry) continue;
+      let data = new Uint8Array(entry.content as unknown as ArrayBuffer);
+      // BinData streams follow the document's global compression flag by
+      // default — deflate-raw when the HWP is compressed. Try to inflate;
+      // fall back to raw bytes if the stream already looks like a real
+      // image (e.g. JPEG SOI, PNG signature) or inflate fails.
+      if (isCompressed && data.length > 4 && !looksLikeImage(data)) {
+        try {
+          if (typeof globalThis.__decompressRawSync === 'function') {
+            data = globalThis.__decompressRawSync(data) as Uint8Array<ArrayBuffer>;
+          } else {
+            data = await decompressRaw(data) as Uint8Array<ArrayBuffer>;
+          }
+        } catch {
+          // leave data as-is if decompression fails
+        }
       }
+      await fs.writeFile(docId, `BinData/${streamName}`, data);
     }
   }
+}
+
+function looksLikeImage(data: Uint8Array): boolean {
+  if (data.length < 4) return false;
+  // JPEG SOI
+  if (data[0] === 0xFF && data[1] === 0xD8 && data[2] === 0xFF) return true;
+  // PNG
+  if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4E && data[3] === 0x47) return true;
+  // GIF87a / GIF89a
+  if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) return true;
+  // BMP
+  if (data[0] === 0x42 && data[1] === 0x4D) return true;
+  return false;
 }
 
 // ── Main export ──
@@ -164,7 +192,7 @@ export async function convertHwpToHwpx(data: ArrayBuffer, docId: string): Promis
   await fs.writeFile(docId, 'settings.xml', generateSettingsXml());
 
   // Extract embedded binary data
-  await extractBinData(cfb, docId, docInfo.binDataItems);
+  await extractBinData(cfb, docId, docInfo.binDataItems, isCompressed);
 
   return sectionCount;
 }

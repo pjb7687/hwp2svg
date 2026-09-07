@@ -84,6 +84,7 @@ export function findChild(parent: Element, lName: string): Element | null {
 
 /** Detect if a character is CJK (Korean/Chinese/Japanese). */
 export function isCJK(ch: string): boolean {
+  if (!ch) return false;
   const code = ch.charCodeAt(0);
   return (
     (code >= 0xAC00 && code <= 0xD7AF) || // Hangul Syllables
@@ -97,12 +98,15 @@ export function isCJK(ch: string): boolean {
 
 // ── Text measurement ──
 
-/** Estimate text width in mm based on font size (in mm) and character types */
+/** Estimate text width in mm based on font size (in mm) and character types.
+ *  Korean font space glyph is roughly half-em (500/1000) which is wider than
+ *  a typical Latin space (~400/1000). Using 0.5em matches what Hancom renders
+ *  when the paragraph is set in a Korean font. */
 export function estimateTextWidth(text: string, fontSizeMm: number): number {
   let width = 0;
   for (const ch of text) {
     if (ch === ' ') {
-      width += fontSizeMm * 0.4;  // Spaces are always Latin-width
+      width += fontSizeMm * 0.5;  // Korean-font space is ~half-em
     } else if (isCJK(ch)) {
       width += fontSizeMm;  // CJK chars are roughly square
     } else {
@@ -186,23 +190,80 @@ export function clearFonts(): void {
   fontRegistry.clear();
 }
 
-/** Build @font-face CSS and global text styles for SVG. */
+/** Build @font-face CSS for any embedded fonts in the SVG. */
 export function buildFontFaceCSS(): string {
   const rules: string[] = [];
   for (const [name, dataUri] of fontRegistry) {
     rules.push(`@font-face { font-family: "${name}"; src: url("${dataUri}"); }`);
   }
-  // HWP renders spaces slightly wider than the SVG default font metrics.
-  // An empirical 0.025em offset brings Korean body text widths in line with
-  // the reference PDF rendering.
-  rules.push('text { word-spacing: 0.03em; }');
   return `<defs><style type="text/css">\n${rules.join('\n')}\n</style></defs>`;
 }
 
-/** Wrap font name with fallback chain for SVG font-family attribute.
- *  Primary fallback: 한컴바탕 (Haansoft Batang), then 함초롬바탕/돋움. */
-export function fontFamilyWithFallback(name: string): string {
-  return `${name}, 한컴바탕, Haansoft Batang, 함초롬바탕, HCR Batang, 함초롬돋움, HCR Dotum, Malgun Gothic, 맑은 고딕, Apple SD Gothic Neo, Noto Sans KR, sans-serif`;
+import type { FontKind } from './svg-types.js';
+
+/** HWP typeInfo familyType → CSS generic family bucket.
+ *  These constants come from the HWP-XML typeInfo attribute (values like
+ *  "FCAT_GOTHIC", "FCAT_MYUNGJO", ...). See Hancom's PANOSE-inspired taxonomy. */
+const FAMILY_TYPE_MAP: Record<string, FontKind> = {
+  FCAT_MYUNGJO:    'serif',       // 명조 – Korean serif
+  FCAT_GOTHIC:     'sans-serif',  // 고딕 – Korean sans-serif
+  FCAT_GRAPHIC:    'sans-serif',  // graphic – treat as sans
+  FCAT_ROMAN:      'serif',       // Latin serif
+  FCAT_SWISS:      'sans-serif',  // Latin sans
+  FCAT_MODERN:     'monospace',   // typewriter / modern (monospaced)
+  FCAT_SCRIPT:     'cursive',
+  FCAT_DECORATIVE: 'fantasy',
+  FCAT_SYMBOL:     'sans-serif',
+  FCAT_ANY:        'sans-serif',
+};
+
+export function familyTypeToKind(familyType: string): FontKind | undefined {
+  return FAMILY_TYPE_MAP[familyType.toUpperCase()];
+}
+
+/** Fallback classification by common Korean/Latin font naming conventions. */
+export function classifyFontByName(name: string): FontKind {
+  const n = name.toLowerCase();
+  // Korean serif keywords
+  if (/(바탕|명조|신명|궁서|batang|myungjo|myeongjo)/.test(name.toLowerCase())) return 'serif';
+  // Korean sans-serif keywords
+  if (/(돋움|고딕|굴림|dotum|gothic|gulim|malgun|맑은)/.test(name.toLowerCase())) return 'sans-serif';
+  // Monospace
+  if (/(mono|courier|consolas|d2coding|나눔고딕코딩|맑은고딕코딩)/.test(n)) return 'monospace';
+  // Latin serif keywords
+  if (/(serif|times|garamond|georgia|book antiqua|palatino|cambria)/.test(n)) return 'serif';
+  // Latin sans keywords
+  if (/(sans|arial|helvetica|verdana|tahoma|calibri|geneva|noto sans)/.test(n)) return 'sans-serif';
+  // Script/decorative
+  if (/(script|hand|brush|italic hand)/.test(n)) return 'cursive';
+  // Default: sans-serif (matches SVG default and prior behavior)
+  return 'sans-serif';
+}
+
+// Per-kind fallback chains. Each chain ends in the CSS generic family so
+// browsers without any Korean font installed still pick a face of the right
+// visual class (serif vs. sans-serif) instead of the default sans.
+const FALLBACK_CHAINS: Record<FontKind, string> = {
+  'serif':
+    '한컴바탕, Haansoft Batang, 함초롬바탕, HCR Batang, 바탕, Batang, 나눔명조, NanumMyeongjo, 신명조, Noto Serif KR, Noto Serif CJK KR, "Times New Roman", Georgia, serif',
+  'sans-serif':
+    '함초롬돋움, HCR Dotum, 맑은 고딕, Malgun Gothic, 나눔고딕, NanumGothic, 돋움, Dotum, 굴림, Gulim, Apple SD Gothic Neo, Noto Sans KR, Noto Sans CJK KR, Arial, Helvetica, sans-serif',
+  'monospace':
+    'D2Coding, "Nanum Gothic Coding", Consolas, "Courier New", monospace',
+  'cursive':
+    '"Nanum Pen Script", "Nanum Brush Script", cursive',
+  'fantasy':
+    'Impact, fantasy',
+};
+
+/** Wrap font name with a fallback chain appropriate for its kind.
+ *  If kind is omitted, classifies by name. */
+export function fontFamilyWithFallback(name: string, kind?: FontKind): string {
+  const k: FontKind = kind ?? classifyFontByName(name);
+  // Deduplicate: if the primary name already appears in the chain, don't add
+  // it twice — otherwise cascade behaves normally.
+  const chain = FALLBACK_CHAINS[k];
+  return `${name}, ${chain}`;
 }
 
 /** Get font name for a character based on script detection. */

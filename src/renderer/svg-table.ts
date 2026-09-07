@@ -7,7 +7,76 @@ import {
   hu2mm, escapeXml, attr, intAttr, find, children, findChild,
   isCJK, fontForChar, spacingForChar, fontFamilyWithFallback, wrapText, estimateTextWidth,
 } from './svg-utils.js';
-import { collectRuns, letterSpacingAttr } from './svg-text.js';
+import { collectRuns, letterSpacingAttr, textDecorationAttr, renderPictures } from './svg-text.js';
+import { mapPuaStringToUnicode } from '../hwp/hwp-section.js';
+
+let _gradIdCounter = 0;
+
+/** Cumulative visible height of a paragraph in mm. Only looks at the
+ *  paragraph's OWN direct linesegarray (not any nested-table cell linesegs),
+ *  and takes max with nested tables' declared heights so a treatAsChar=1
+ *  table whose lineseg vertsize already counts its height isn't double-added. */
+function paraTotalHeightMm(paraEl: Element): number {
+  let linesegBottom = 0;
+  const lsas: Element[] = [];
+  for (const child of Array.from(paraEl.children)) {
+    if ((child.localName || child.nodeName.split(':').pop()) === 'linesegarray') lsas.push(child);
+  }
+  for (const lsa of lsas) {
+    for (const seg of children(lsa, 'lineseg')) {
+      const bottom = intAttr(seg, 'vertpos', 0) + intAttr(seg, 'vertsize', 0);
+      if (bottom > linesegBottom) linesegBottom = bottom;
+    }
+  }
+  let nestedH = 0;
+  for (const nestedTbl of findDirectTables(paraEl)) {
+    const szEl = find(nestedTbl, 'sz');
+    const h = szEl ? hu2mm(intAttr(szEl, 'height', 0)) : 0;
+    nestedH += h;
+  }
+  return Math.max(hu2mm(linesegBottom), nestedH);
+}
+
+/** Emit fill SVG for a cell — solid `<rect fill="#..."/>` or, for gradient
+ *  borderFills, `<defs><linearGradient>...` + a rect referencing it. */
+function cellFillSvg(bf: BorderFillInfo | undefined, x: number, y: number, w: number, h: number, caches?: Caches): string {
+  if (!bf) return '';
+  if (bf.fillColor) {
+    return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" fill="${bf.fillColor}" stroke="none"/>`;
+  }
+  if (bf.imageBinDataId && caches) {
+    const href = caches.binData.get(bf.imageBinDataId);
+    if (href) {
+      // HWP fill modes control how the image maps to the cell rect. RESIZE=
+      // stretch to fill; CENTER=center at native size; TILE_ALL=repeat. We
+      // approximate with preserveAspectRatio: RESIZE → "none" (stretch),
+      // CENTER → "xMidYMid meet" (fit + center), tiling → same as RESIZE for
+      // now (would need SVG <pattern> for true tiling).
+      const mode = bf.imageFillMode ?? 'RESIZE';
+      const aspect = (mode === 'RESIZE') ? 'none' : 'xMidYMid meet';
+      return `<image preserveAspectRatio="${aspect}" xlink:href="${href}" href="${href}" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}"/>`;
+    }
+  }
+  if (bf.gradientColors && bf.gradientColors.length > 0) {
+    if (bf.gradientColors.length === 1) {
+      return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" fill="${bf.gradientColors[0]}" stroke="none"/>`;
+    }
+    const gid = `hwp-cell-grad-${_gradIdCounter++}`;
+    const angle = bf.gradientAngle ?? 0;
+    // HWP shear angle: 0° = top-to-bottom, 90° = left-to-right (matches
+    // Hancom Office behaviour). Vector components dx=sin, dy=cos give the
+    // correct direction of gradient progression.
+    const rad = (angle * Math.PI) / 180;
+    const dx = Math.sin(rad), dy = Math.cos(rad);
+    const stops = bf.gradientColors.map((c, i) => {
+      const pct = (i * 100 / (bf.gradientColors!.length - 1));
+      return `<stop offset="${pct.toFixed(2)}%" stop-color="${c}"/>`;
+    }).join('');
+    const defs = `<defs><linearGradient id="${gid}" gradientUnits="userSpaceOnUse" x1="${x.toFixed(2)}" y1="${y.toFixed(2)}" x2="${(x + w * dx).toFixed(2)}" y2="${(y + h * dy).toFixed(2)}">${stops}</linearGradient></defs>`;
+    return `${defs}<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" fill="url(#${gid})" stroke="none"/>`;
+  }
+  return '';
+}
 
 // ── Helpers for avoiding double-rendering of nested tables ──
 
@@ -18,20 +87,27 @@ import { collectRuns, letterSpacingAttr } from './svg-text.js';
  */
 export function findDirectTables(paraEl: Element): Element[] {
   const results: Element[] = [];
-  function walk(el: Element) {
+  function walk(el: Element, insideRect: boolean) {
     for (const child of Array.from(el.children)) {
       const ln = localName(child);
       if (ln === 'tbl') {
         results.push(child);
         // Don't descend into the table — inner tables belong to cell content
-      } else if (ln === 'tc' || ln === 'subList') {
+      } else if (ln === 'tc') {
         // Don't descend into table cells
+      } else if (ln === 'subList') {
+        // subLists inside a rect wrap the shape's inner paragraphs;
+        // descend so we can pick up tables inside shape text-boxes. subLists
+        // inside a tc are cell content and handled by the cell renderer.
+        if (insideRect) walk(child, false);
+      } else if (ln === 'rect') {
+        walk(child, true);
       } else {
-        walk(child);
+        walk(child, insideRect);
       }
     }
   }
-  walk(paraEl);
+  walk(paraEl, false);
   return results;
 }
 
@@ -92,50 +168,6 @@ function borderStrokeDasharray(borderType: string): string {
     case 'DASH_DOT_DOT': return ' stroke-dasharray="1.5,0.3,0.3,0.3,0.3,0.3"';
     default: return '';  // SOLID or unknown
   }
-}
-
-/**
- * Render cell background fill and border lines.
- * Returns SVG elements for the cell background rect and 4 border lines.
- */
-export function renderCellBorderAndFill(
-  x: number, y: number, w: number, h: number,
-  borderFill: BorderFillInfo | undefined,
-): string[] {
-  const parts: string[] = [];
-
-  // Background fill
-  if (borderFill?.fillColor) {
-    parts.push(`<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" fill="${borderFill.fillColor}" stroke="none"/>`);
-  }
-
-  if (borderFill) {
-    // Left border
-    const lw = parseBorderWidth(borderFill.leftBorderWidth);
-    if (lw > 0 && !isBorderNone(borderFill.leftBorderType)) {
-      parts.push(`<line x1="${x.toFixed(2)}" y1="${y.toFixed(2)}" x2="${x.toFixed(2)}" y2="${(y + h).toFixed(2)}" stroke="${borderFill.leftBorderColor}" stroke-width="${lw.toFixed(2)}"${borderStrokeDasharray(borderFill.leftBorderType)}/>`);
-    }
-    // Right border
-    const rw = parseBorderWidth(borderFill.rightBorderWidth);
-    if (rw > 0 && !isBorderNone(borderFill.rightBorderType)) {
-      parts.push(`<line x1="${(x + w).toFixed(2)}" y1="${y.toFixed(2)}" x2="${(x + w).toFixed(2)}" y2="${(y + h).toFixed(2)}" stroke="${borderFill.rightBorderColor}" stroke-width="${rw.toFixed(2)}"${borderStrokeDasharray(borderFill.rightBorderType)}/>`);
-    }
-    // Top border
-    const tw = parseBorderWidth(borderFill.topBorderWidth);
-    if (tw > 0 && !isBorderNone(borderFill.topBorderType)) {
-      parts.push(`<line x1="${x.toFixed(2)}" y1="${y.toFixed(2)}" x2="${(x + w).toFixed(2)}" y2="${y.toFixed(2)}" stroke="${borderFill.topBorderColor}" stroke-width="${tw.toFixed(2)}"${borderStrokeDasharray(borderFill.topBorderType)}/>`);
-    }
-    // Bottom border
-    const bw = parseBorderWidth(borderFill.bottomBorderWidth);
-    if (bw > 0 && !isBorderNone(borderFill.bottomBorderType)) {
-      parts.push(`<line x1="${x.toFixed(2)}" y1="${(y + h).toFixed(2)}" x2="${(x + w).toFixed(2)}" y2="${(y + h).toFixed(2)}" stroke="${borderFill.bottomBorderColor}" stroke-width="${bw.toFixed(2)}"${borderStrokeDasharray(borderFill.bottomBorderType)}/>`);
-    }
-  } else {
-    // Fallback: simple black border
-    parts.push(`<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" fill="none" stroke="#000" stroke-width="0.1"/>`);
-  }
-
-  return parts;
 }
 
 // ── Grid-line detection for table borders ──
@@ -491,6 +523,7 @@ export function renderCellContent(
     fw: string;
     fi: string;
     ls: string; // letter-spacing attr string
+    td: string; // text-decoration attr string
   }
   interface LineInfo {
     segments: RunSegment[];
@@ -506,11 +539,15 @@ export function renderCellContent(
     spacingMm?: number;  // extra inter-line spacing (from lineseg)
     isLastLine?: boolean; // true if this is the last line of its paragraph
     justify?: boolean;   // paragraph uses JUSTIFY horizontal alignment
+    flags?: number;      // raw lineseg flags
+    isWordWrapped?: boolean; // line ended by word-wrap (auto), not by explicit break
     distribute?: boolean; // paragraph uses DISTRIBUTE alignment (spread across horzsizeMm)
     squeeze?: boolean;   // 한 줄로 입력: compress spacing to fit single line
   }
-  // Content items: either text lines or nested tables, in paragraph order
-  type ContentItem = { kind: 'line'; line: LineInfo } | { kind: 'table'; tbl: Element; heightMm: number; outMarginTopMm: number; outMarginBottomMm: number; outMarginLeftMm: number; outMarginRightMm: number; vertposMm?: number };
+  // Content items: either text lines or nested tables, in paragraph order.
+  // spacingBeforeMm is set on the FIRST item of each paragraph, spacingAfterMm
+  // on the LAST item, so the render loop can add paragraph 앞/뒤 margins.
+  type ContentItem = ({ kind: 'line'; line: LineInfo } | { kind: 'table'; tbl: Element; heightMm: number; outMarginTopMm: number; outMarginBottomMm: number; outMarginLeftMm: number; outMarginRightMm: number; vertposMm?: number }) & { spacingBeforeMm?: number; spacingAfterMm?: number };
   const contentItems: ContentItem[] = [];
   const allLines: LineInfo[] = [];
   let totalContentH = mTop + mBottom; // start with vertical margins
@@ -540,43 +577,60 @@ export function renderCellContent(
       else if (align === 2) { anchor = 'end'; tx = x + cellW - mRight; }
 
       if (anchor === 'start') {
-        tx += hu2mm(paraShape.leftMargin) * 0.53;
+        // paraShape.leftMargin / indent are HWPUNIT. hu2mm gives mm directly —
+        // no scale factor needed (the old *0.5 / *0.53 heuristics were bugs
+        // that under-indented hanging paragraphs).
+        tx += hu2mm(paraShape.leftMargin);
         if (paraShape.indent < 0) {
-          // 내어쓰기 (hanging indent): body lines indented right by |indent| * 0.5mm
-          bodyIndentMm = hu2mm(-paraShape.indent) * 0.5;
+          // 내어쓰기: body lines shift right by |indent| so continuation
+          // lines align with the text after the first-line marker.
+          bodyIndentMm = hu2mm(-paraShape.indent);
         } else if (paraShape.indent > 0) {
-          firstLineIndentMm = hu2mm(paraShape.indent) * 0.5;
+          firstLineIndentMm = hu2mm(paraShape.indent);
         }
       }
     }
 
     const paraLineSpacing = paraShape ? paraShape.lineSpacing / 100 : 1.6;
+    const paraSpacingBeforeMm = paraShape ? hu2mm(paraShape.spacingBefore) : 0;
+    const paraSpacingAfterMm = paraShape ? hu2mm(paraShape.spacingAfter) : 0;
+    const itemsBefore = contentItems.length;
 
     if (!fullText.trim()) {
+      const paraNestedTables = findDirectTables(paraEl);
       const linesegArray = children(paraEl, 'linesegarray')[0];
       const firstSeg = linesegArray ? children(linesegArray, 'lineseg')[0] : null;
       const segVertpos = firstSeg ? hu2mm(intAttr(firstSeg, 'vertpos', 0)) : 0;
       const segVertsize = firstSeg ? hu2mm(intAttr(firstSeg, 'vertsize', 0)) : 0;
-      if (segVertsize > 0) {
-        anyLinesegData = true;
-        const bottom = segVertpos + segVertsize;
-        if (bottom > maxLineBottomMm) maxLineBottomMm = bottom;
-        totalContentH += segVertsize;
-      } else {
-        totalContentH += fontSize * paraLineSpacing;
+      // An empty paragraph that ALSO carries a nested table (e.g. the outer
+      // 별첨 wrapper cell where paragraphs stack purely to hold tables) should
+      // not advance textY for its own text line — the table sits at
+      // cellContentY + nested lineseg vertpos. If it has no nested table,
+      // it's genuinely blank space that should consume vertical room.
+      if (paraNestedTables.length === 0) {
+        if (segVertsize > 0) {
+          anyLinesegData = true;
+          const bottom = segVertpos + segVertsize;
+          if (bottom > maxLineBottomMm) maxLineBottomMm = bottom;
+          totalContentH += segVertsize;
+        } else {
+          totalContentH += fontSize * paraLineSpacing;
+        }
       }
-      const emptyLine: LineInfo = { segments: [], fontSize, lineSpacing: paraLineSpacing, anchor, tx, vertposMm: segVertpos, vertsizeMm: segVertsize > 0 ? segVertsize : undefined };
-      allLines.push(emptyLine);
-      contentItems.push({ kind: 'line', line: emptyLine });
+      const emptyLine: LineInfo = { segments: [], fontSize, lineSpacing: paraLineSpacing, anchor, tx, vertposMm: segVertpos, vertsizeMm: (segVertsize > 0 && paraNestedTables.length === 0) ? segVertsize : undefined };
+      if (paraNestedTables.length === 0) {
+        allLines.push(emptyLine);
+        contentItems.push({ kind: 'line', line: emptyLine });
+      }
 
-      const paraNestedTables = findDirectTables(paraEl);
       for (const nestedTbl of paraNestedTables) {
         const szEl = find(nestedTbl, 'sz');
         const nestedH = szEl ? hu2mm(intAttr(szEl, 'height', 0)) : 0;
-        const omTop = hu2mm(intAttr(nestedTbl, 'outMarginTop', 0));
-        const omBottom = hu2mm(intAttr(nestedTbl, 'outMarginBottom', 0));
-        const omLeft = hu2mm(intAttr(nestedTbl, 'outMarginLeft', 0));
-        const omRight = hu2mm(intAttr(nestedTbl, 'outMarginRight', 0));
+        const omEl = find(nestedTbl, 'outMargin');
+        const omTop = hu2mm(omEl ? intAttr(omEl, 'top', 0) : intAttr(nestedTbl, 'outMarginTop', 0));
+        const omBottom = hu2mm(omEl ? intAttr(omEl, 'bottom', 0) : intAttr(nestedTbl, 'outMarginBottom', 0));
+        const omLeft = hu2mm(omEl ? intAttr(omEl, 'left', 0) : intAttr(nestedTbl, 'outMarginLeft', 0));
+        const omRight = hu2mm(omEl ? intAttr(omEl, 'right', 0) : intAttr(nestedTbl, 'outMarginRight', 0));
         contentItems.push({ kind: 'table', tbl: nestedTbl, heightMm: nestedH, outMarginTopMm: omTop, outMarginBottomMm: omBottom, outMarginLeftMm: omLeft, outMarginRightMm: omRight, vertposMm: segVertpos });
       }
       continue;
@@ -594,7 +648,7 @@ export function renderCellContent(
     const linesegArray = children(paraEl, 'linesegarray')[0];
     const lineSegs = linesegArray ? children(linesegArray, 'lineseg') : [];
 
-    interface LineRange { start: number; end: number; vertposMm?: number; baselineMm?: number; horzsizeMm?: number; horzposMm?: number; vertsizeMm?: number; spacingMm?: number; }
+    interface LineRange { start: number; end: number; vertposMm?: number; baselineMm?: number; horzsizeMm?: number; horzposMm?: number; vertsizeMm?: number; spacingMm?: number; flags?: number; }
     let lineRanges: LineRange[];
     if (lineSegs.length > 1) {
       const textPositions: number[] = lineSegs.map(seg => intAttr(seg, 'textpos', 0));
@@ -609,7 +663,8 @@ export function renderCellContent(
           const horzpos = intAttr(lineSegs[si], 'horzpos', 0);
           const vertsize = intAttr(lineSegs[si], 'vertsize', 0);
           const spacing = intAttr(lineSegs[si], 'spacing', 0);
-          lineRanges.push({ start, end, vertposMm: hu2mm(vertpos), baselineMm: hu2mm(baseline), horzsizeMm: horzsize > 0 ? hu2mm(horzsize) : undefined, horzposMm: horzpos > 0 ? hu2mm(horzpos) : undefined, vertsizeMm: vertsize > 0 ? hu2mm(vertsize) : undefined, spacingMm: spacing > 0 ? hu2mm(spacing) : undefined });
+          const flags = intAttr(lineSegs[si], 'flags', 0);
+          lineRanges.push({ start, end, vertposMm: hu2mm(vertpos), baselineMm: hu2mm(baseline), horzsizeMm: horzsize > 0 ? hu2mm(horzsize) : undefined, horzposMm: horzpos > 0 ? hu2mm(horzpos) : undefined, vertsizeMm: vertsize > 0 ? hu2mm(vertsize) : undefined, spacingMm: spacing > 0 ? hu2mm(spacing) : undefined, flags });
         }
       }
     } else {
@@ -652,9 +707,37 @@ export function renderCellContent(
       }
     }
 
+    // Bullet segment prepended to the first line of a bulleted paragraph.
+    // We inherit the char shape of the first real run so the bullet's size
+    // and color match the visible text.
+    let bulletSeg: RunSegment | null = null;
+    if (paraShape?.bulletId) {
+      const rawBullet = caches.bullets?.get(String(paraShape.bulletId));
+      if (rawBullet) {
+        const bulletText = mapPuaStringToUnicode(rawBullet);
+        if (bulletText.trim()) {
+          const rcs = caches.charShapes.get(firstRun?.charPrId ?? '');
+          const sampleCh = bulletText[0];
+          bulletSeg = {
+            text: bulletText + ' ',
+            fontSize: rcs ? hu2mm(rcs.height) : 3.5,
+            fontFamily: rcs ? fontForChar(rcs, sampleCh) : 'sans-serif',
+            color: rcs?.textColor || '#000000',
+            fw: rcs?.bold ? 'bold' : 'normal',
+            fi: rcs?.italic ? 'italic' : 'normal',
+            ls: '',
+            td: '',
+          };
+        }
+      }
+    }
+
     // For each line, build segments grouped by run styling AND script type
     for (const range of lineRanges) {
       const segments: RunSegment[] = [];
+      if (bulletSeg && range === lineRanges[0]) {
+        segments.push(bulletSeg);
+      }
       let segStart = range.start;
       while (segStart < range.end) {
         const ri = charRunMap[segStart] ?? 0;
@@ -685,6 +768,7 @@ export function renderCellContent(
             fw: rcs?.bold ? 'bold' : 'normal',
             fi: rcs?.italic ? 'italic' : 'normal',
             ls: letterSpacingAttr(rcs, sampleCh),
+            td: textDecorationAttr(rcs),
           });
           scriptStart = scriptEnd;
         }
@@ -705,7 +789,14 @@ export function renderCellContent(
       const isLast = range === lineRanges[lineRanges.length - 1];
       const isJustify = paraShape?.alignment === 0;
       const isDistribute = paraShape?.alignment === 4;
-      const lineInfo: LineInfo = { segments, fontSize: lineFontSize, lineSpacing: paraLineSpacing, anchor, tx: lineTx, vertposMm: range.vertposMm, baselineMm: range.baselineMm, horzsizeMm: range.horzsizeMm, horzposMm: range.horzposMm, vertsizeMm: rangeVertsizeMm, spacingMm: rangeSpacingMm, isLastLine: isLast, justify: isJustify, distribute: isDistribute, squeeze: isSqueeze };
+      // Detect whether this line ended by an explicit line break (hp:lineBreak
+      // inserted as \n during collectRuns) vs auto word-wrap. Non-last lines
+      // ending in \n should NOT be JUSTIFY-stretched — HWP renders them at
+      // their natural width so the last text token stays where the author
+      // intended.
+      const lineText = fullText.substring(range.start, range.end);
+      const endedByLineBreak = lineText.endsWith('\n') || fullText.charAt(range.end) === '\n';
+      const lineInfo: LineInfo = { segments, fontSize: lineFontSize, lineSpacing: paraLineSpacing, anchor, tx: lineTx, vertposMm: range.vertposMm, baselineMm: range.baselineMm, horzsizeMm: range.horzsizeMm, horzposMm: range.horzposMm, vertsizeMm: rangeVertsizeMm, spacingMm: rangeSpacingMm, isLastLine: isLast || endedByLineBreak, justify: isJustify, distribute: isDistribute, squeeze: isSqueeze };
       allLines.push(lineInfo);
       contentItems.push({ kind: 'line', line: lineInfo });
       if (rangeVertsizeMm !== undefined && rangeVertsizeMm > 0) {
@@ -727,13 +818,20 @@ export function renderCellContent(
       for (const nestedTbl of paraNestedTables) {
         const szEl = find(nestedTbl, 'sz');
         const nestedH = szEl ? hu2mm(intAttr(szEl, 'height', 0)) : 0;
-        const omTop = hu2mm(intAttr(nestedTbl, 'outMarginTop', 0));
-        const omBottom = hu2mm(intAttr(nestedTbl, 'outMarginBottom', 0));
-        const omLeft = hu2mm(intAttr(nestedTbl, 'outMarginLeft', 0));
-        const omRight = hu2mm(intAttr(nestedTbl, 'outMarginRight', 0));
+        const omEl = find(nestedTbl, 'outMargin');
+        const omTop = hu2mm(omEl ? intAttr(omEl, 'top', 0) : intAttr(nestedTbl, 'outMarginTop', 0));
+        const omBottom = hu2mm(omEl ? intAttr(omEl, 'bottom', 0) : intAttr(nestedTbl, 'outMarginBottom', 0));
+        const omLeft = hu2mm(omEl ? intAttr(omEl, 'left', 0) : intAttr(nestedTbl, 'outMarginLeft', 0));
+        const omRight = hu2mm(omEl ? intAttr(omEl, 'right', 0) : intAttr(nestedTbl, 'outMarginRight', 0));
         contentItems.push({ kind: 'table', tbl: nestedTbl, heightMm: nestedH, outMarginTopMm: omTop, outMarginBottomMm: omBottom, outMarginLeftMm: omLeft, outMarginRightMm: omRight, vertposMm: paraLineTopMm });
         totalContentH += nestedH + omTop + omBottom;
       }
+    }
+    // Attach the paragraph's spacingBefore to its FIRST new content item and
+    // spacingAfter to its LAST so the render loop can push textY appropriately.
+    if (contentItems.length > itemsBefore) {
+      if (paraSpacingBeforeMm > 0) contentItems[itemsBefore].spacingBeforeMm = paraSpacingBeforeMm;
+      if (paraSpacingAfterMm > 0) contentItems[contentItems.length - 1].spacingAfterMm = paraSpacingAfterMm;
     }
   }
 
@@ -743,7 +841,29 @@ export function renderCellContent(
     nestedTables.push(...findDirectTables(paraEl));
   }
 
-  if (allLines.length === 0 && nestedTables.length === 0) return parts;
+  // Emit any pictures anchored in this cell's paragraphs. HWP anchors a
+  // "treatAsChar" picture inside the paragraph's text flow, so its horizontal
+  // placement follows the paragraph's alignment (LEFT/CENTER/RIGHT).
+  let picStripH = 0;
+  const picYBase = y + mTop;
+  for (const paraEl of cellParas) {
+    const paraPrIdRefP = attr(paraEl, 'paraPrIDRef', attr(paraEl, 'paraPrId', ''));
+    const paraShapeP = paraPrIdRefP ? caches.paraShapes.get(paraPrIdRefP) : undefined;
+    // Peek at total pic width so alignment (center/right) can offset correctly.
+    const probe = renderPictures(paraEl, caches, 0, 0);
+    if (!probe.svg) continue;
+    let picX = x + mLeft;
+    const align = paraShapeP?.alignment;
+    if (align === 3) picX = x + (cellW - probe.reservedW) / 2;          // CENTER
+    else if (align === 2) picX = x + cellW - mRight - probe.reservedW;  // RIGHT
+    const p = renderPictures(paraEl, caches, picX, picYBase + picStripH);
+    if (p.svg) {
+      parts.push(p.svg);
+      picStripH += p.reservedH;
+    }
+  }
+
+  if (allLines.length === 0 && nestedTables.length === 0 && picStripH === 0) return parts;
 
   // Add clip path — expand if lineseg content exceeds declared cell height
   const clipId = `cell-clip-${_clipIdCounter++}`;
@@ -758,15 +878,12 @@ export function renderCellContent(
   parts.push(`<clipPath id="${clipId}"><rect x="${clipX.toFixed(2)}" y="${y.toFixed(2)}" width="${clipW.toFixed(2)}" height="${clipH.toFixed(2)}"/></clipPath>`);
 
   const textOnlyH = anyLinesegData ? maxLineBottomMm : totalContentH - mTop - mBottom;
-  let effectiveVertAlign = vertAlignMode;
-  if (effectiveVertAlign === 0 && textOnlyH > 0 && textOnlyH < centerCellH) {
-    effectiveVertAlign = 1; // CENTER
-  }
-
+  // Honor subList.vertAlign strictly per spec: TOP=0 leaves content at the
+  // top of the cell, CENTER=1 vertically centers, BOTTOM=2 pushes to bottom.
   let vertOffset = 0;
-  if (effectiveVertAlign === 1) {
+  if (vertAlignMode === 1) {
     vertOffset = Math.max(0, (centerCellH - mTop - mBottom - textOnlyH) / 2);
-  } else if (effectiveVertAlign === 2) {
+  } else if (vertAlignMode === 2) {
     vertOffset = Math.max(0, centerCellH - mTop - mBottom - textOnlyH);
   }
 
@@ -779,19 +896,48 @@ export function renderCellContent(
   parts.push(`<g clip-path="url(#${clipId})">`);
   let isFirstRenderedLine = true;
   for (const item of contentItems) {
+    // Advance textY for paragraph spacingBefore (문단 간격 위) attached to
+    // the first item of each paragraph.
+    if (item.spacingBeforeMm) textY += item.spacingBeforeMm;
     if (item.kind === 'table') {
-      let tableY = textY;
+      // Nested inline table's own outMargin.top (바깥 여백) pushes the box
+      // down away from prior content.
+      let tableY = textY + item.outMarginTopMm;
       if (item.vertposMm !== undefined) {
-        tableY = cellContentY + item.vertposMm + item.outMarginTopMm;
+        // vertposMm is paragraph-local — the paragraph's own first lineseg
+        // start. It resets to 0 for each paragraph in the cell, so never let
+        // it pull tableY BACKWARDS above the running textY.
+        const candidateY = cellContentY + item.vertposMm + item.outMarginTopMm;
+        if (candidateY > tableY) tableY = candidateY;
       }
-      const tableX = textX + item.outMarginLeftMm;
+      // Inline (treatAsChar=1) nested tables sit at the RUN START of a HWP
+      // hanging paragraph, which is leftMargin + |indent| (body-line
+      // position). All inline tables in the same outer cell share the same
+      // effective anchor, so use the FIRST cell paragraph's indent as the
+      // representative value — this matches HWP's rendering that treats
+      // stacked inline wrappers as sharing a common text baseline anchor.
+      const firstPara = cellParas[0];
+      let runOffsetMm = 0;
+      if (firstPara) {
+        const firstPrIdRef = attr(firstPara, 'paraPrIDRef', attr(firstPara, 'paraPrId', ''));
+        const firstShape = firstPrIdRef ? caches.paraShapes.get(firstPrIdRef) : undefined;
+        if (firstShape) {
+          runOffsetMm += hu2mm(firstShape.leftMargin);
+          if (firstShape.indent < 0) runOffsetMm += hu2mm(-firstShape.indent);
+          else if (firstShape.indent > 0) runOffsetMm += hu2mm(firstShape.indent);
+        }
+      }
+      const tableX = textX + runOffsetMm + item.outMarginLeftMm;
       const nestedResult = renderTableEl(item.tbl, caches, tableX, tableY, textWidth - item.outMarginLeftMm - item.outMarginRightMm);
       if (nestedResult) {
         textY = tableY;
         parts.push(nestedResult.svg);
-        textY += nestedResult.height;
+        // Advance by the nested table's rendered height plus its own
+        // outMargin.bottom, so following text sits clear of the box.
+        textY += nestedResult.height + item.outMarginBottomMm;
         isFirstRenderedLine = true; // reset: next text line starts a fresh block
       }
+      if (item.spacingAfterMm) textY += item.spacingAfterMm;
       continue;
     }
     const line = item.line;
@@ -806,11 +952,24 @@ export function renderCellContent(
       }
       continue;
     }
-    if (useLinesegPos && line.vertposMm !== undefined && line.baselineMm !== undefined) {
-      const linesegY = cellContentY + line.vertposMm + line.baselineMm;
-      textY = Math.max(textY, linesegY);
-    } else if (isFirstRenderedLine && line.baselineMm !== undefined && line.baselineMm > 0) {
+    if (isFirstRenderedLine && line.baselineMm !== undefined && line.baselineMm > 0) {
+      // First line after a nested inline table (or start of content): position
+      // baseline one ascent below the current textY so text doesn't overlap
+      // the preceding block. The lineseg's baselineMm gives us the ascent
+      // portion of the line box.
       textY += line.baselineMm;
+    } else if (useLinesegPos && line.vertposMm !== undefined && line.baselineMm !== undefined) {
+      const linesegY = cellContentY + line.vertposMm + line.baselineMm;
+      if (linesegY >= textY) {
+        textY = linesegY;
+      } else if (line.vertsizeMm !== undefined && line.vertsizeMm > 0) {
+        // linesegY is stale (from a base HWP encoded before layout push).
+        // Advance by the line's own vertsize so the wrapped line sits below
+        // the previous one instead of collapsing onto the same baseline.
+        textY += line.vertsizeMm + (line.spacingMm ?? 0);
+      } else {
+        textY += line.fontSize * line.lineSpacing;
+      }
     } else if (line.vertsizeMm !== undefined && line.vertsizeMm > 0) {
       textY += line.vertsizeMm + (line.spacingMm ?? 0);
     } else {
@@ -821,17 +980,17 @@ export function renderCellContent(
     const lineText = line.segments.map(s => s.text).join('');
     if (line.horzsizeMm !== undefined && line.horzsizeMm > 0) {
       // HWP never scales glyph widths at line level — only adjusts inter-character spacing (자간).
-      // horzsize is the pre-calculated target width from HWP's layout engine.
-      // JUSTIFY (align=0): non-last lines fill horzsize exactly via spacing.
-      // DISTRIBUTE (align=4): all lines fill horzsize via spacing between all characters.
-      // Cap at cell content width: horzsize may be page-relative in some documents.
+      // horzsize is the pre-calculated target width from HWP's layout engine —
+      // it's the FULL cell-content width; for hanging-indent wrap lines the
+      // effective fill width is reduced by the body indent already applied
+      // to line.tx, so cap by (textX + textWidth − line.tx).
+      const spaceRight = Math.max(0, (textX + textWidth) - line.tx);
       if (((line.justify && !line.isLastLine) || line.distribute) && lineText.trim().length > 1) {
-        const targetWidth = Math.min(line.horzsizeMm, textWidth);
+        const targetWidth = Math.min(line.horzsizeMm, spaceRight);
         textLengthAttr = ` textLength="${targetWidth.toFixed(2)}" lengthAdjust="spacing"`;
       } else if (line.anchor === 'end' && line.horzposMm !== undefined && lineText.trim().length > 1) {
         // RIGHT-aligned: force text to exactly fill horzsize so left edge lands at textX+horzpos.
-        // Without this, natural font rendering may place the left edge slightly off.
-        const targetWidth = Math.min(line.horzsizeMm, textWidth);
+        const targetWidth = Math.min(line.horzsizeMm, spaceRight);
         if (targetWidth > 0) {
           textLengthAttr = ` textLength="${targetWidth.toFixed(2)}" lengthAdjust="spacing"`;
         }
@@ -856,6 +1015,8 @@ export function renderCellContent(
       : (line.horzposMm !== undefined && line.anchor === 'end' && line.horzsizeMm !== undefined)
         ? textX + line.horzposMm + line.horzsizeMm
       : line.tx;
+    // Resolve font family with the kind-aware fallback chain from the cache.
+    const family = (name: string) => fontFamilyWithFallback(name, caches.fontKinds?.get(name));
     if (line.segments.length === 1) {
       const seg = line.segments[0];
       // Suppress letter-spacing when textLength is applied with end-anchor:
@@ -864,20 +1025,23 @@ export function renderCellContent(
       const lsAttr = (textLengthAttr && line.anchor === 'end') ? '' : seg.ls;
       // For right-aligned text, trailing spaces shift visible text left — trim them.
       const segText = line.anchor === 'end' ? seg.text.trimEnd() : seg.text;
-      parts.push(`<text xml:space="preserve" x="${lineTx.toFixed(2)}" y="${textY.toFixed(2)}" font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${lsAttr}${textLengthAttr} text-anchor="${line.anchor}">${escapeXml(segText)}</text>`);
+      parts.push(`<text xml:space="preserve" x="${lineTx.toFixed(2)}" y="${textY.toFixed(2)}" font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(family(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${lsAttr}${seg.td}${textLengthAttr} text-anchor="${line.anchor}">${escapeXml(segText)}</text>`);
     } else {
       // For right-aligned text, trailing spaces in the last segment shift visible text left — trim them.
       const segs = line.anchor === 'end'
         ? line.segments.map((seg, i) => i === line.segments.length - 1 ? { ...seg, text: seg.text.trimEnd() } : seg)
         : line.segments;
       const tspans = segs.map(seg =>
-        `<tspan font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(fontFamilyWithFallback(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${seg.ls}>${escapeXml(seg.text)}</tspan>`
+        `<tspan font-size="${seg.fontSize.toFixed(2)}" font-family="${escapeXml(family(seg.fontFamily))}" fill="${seg.color}" font-weight="${seg.fw}" font-style="${seg.fi}"${seg.ls}${seg.td}>${escapeXml(seg.text)}</tspan>`
       ).join('');
       parts.push(`<text xml:space="preserve" x="${lineTx.toFixed(2)}" y="${textY.toFixed(2)}"${textLengthAttr} text-anchor="${line.anchor}">${tspans}</text>`);
     }
     if (!line.vertsizeMm) {
       textY += line.fontSize * (line.lineSpacing - 1);
     }
+    // Paragraph spacingAfter (문단 간격 아래) attached to the LAST item of a
+    // paragraph — applied after that item renders.
+    if (item.spacingAfterMm) textY += item.spacingAfterMm;
   }
 
   parts.push('</g>');
@@ -895,13 +1059,37 @@ export function renderTableWithPageBreaks(
   pages: LayoutItem[][],
   currentPage: number,
   yPos: number,
+  xOffsetMm: number = 0,
 ): { yPos: number; currentPage: number } {
   const rows = children(tblEl, 'tr');
   if (rows.length === 0) return { yPos, currentPage };
 
-  const outMarginTop = hu2mm(intAttr(tblEl, 'outMarginTop', 0));
-  const outMarginBottom = hu2mm(intAttr(tblEl, 'outMarginBottom', 0));
-  yPos += outMarginTop;
+  // Table declared height (hp:sz height). For single-row tables where the
+  // cellSz height exceeds the table's own declared size, Hancom splits the
+  // cell content across pages — we don't split, but we can use hp:sz as the
+  // page-fit cap so the whole table doesn't get pushed to the next page.
+  const tblSzEl = find(tblEl, 'sz');
+  const tblDeclaredH = tblSzEl ? hu2mm(intAttr(tblSzEl, 'height', 0)) : 0;
+
+  // HWPX stores outMargin (바깥 여백) as a child element <hp:outMargin ...>,
+  // not as attributes on <hp:tbl>. Same for the anchored position offset
+  // <hp:pos vertOffset/horzOffset>. Apply to the top and left edges so the
+  // table starts at the (x, y) HWP intended.
+  const outMarginEl = find(tblEl, 'outMargin');
+  const outMarginTop = outMarginEl
+    ? hu2mm(intAttr(outMarginEl, 'top', 0))
+    : hu2mm(intAttr(tblEl, 'outMarginTop', 0));
+  const outMarginBottom = outMarginEl
+    ? hu2mm(intAttr(outMarginEl, 'bottom', 0))
+    : hu2mm(intAttr(tblEl, 'outMarginBottom', 0));
+  const outMarginLeft = outMarginEl
+    ? hu2mm(intAttr(outMarginEl, 'left', 0))
+    : hu2mm(intAttr(tblEl, 'outMarginLeft', 0));
+  const posEl = find(tblEl, 'pos');
+  const posVertOffset = posEl ? hu2mm(intAttr(posEl, 'vertOffset', 0)) : 0;
+  const posHorzOffset = posEl ? hu2mm(intAttr(posEl, 'horzOffset', 0)) : 0;
+  yPos += posVertOffset + outMarginTop;
+  xOffsetMm += posHorzOffset + outMarginLeft;
 
   const innerML = hu2mm(intAttr(tblEl, 'innerMarginLeft', 0));
   const innerMR = hu2mm(intAttr(tblEl, 'innerMarginRight', 0));
@@ -972,9 +1160,8 @@ export function renderTableWithPageBreaks(
     if (segmentCells.length === 0) return;
     // Phase 1: fills
     for (const pc of segmentCells) {
-      if (pc.bf?.fillColor) {
-        parts.push(`<rect x="${pc.x.toFixed(2)}" y="${pc.y.toFixed(2)}" width="${pc.w.toFixed(2)}" height="${pc.h.toFixed(2)}" fill="${pc.bf.fillColor}" stroke="none"/>`);
-      }
+      const s = cellFillSvg(pc.bf, pc.x, pc.y, pc.w, pc.h, caches);
+      if (s) parts.push(s);
     }
     // Phase 2: grid-detected border lines
     const { hLines, vLines } = buildGridLines(segmentCells.map(pc => ({ x: pc.x, y: pc.y, w: pc.w, h: pc.h, bf: pc.bf })), tableBf);
@@ -995,7 +1182,14 @@ export function renderTableWithPageBreaks(
 
     const actualRowH = rowHeights.get(rowAddr) ?? rowH;
 
-    if (yPos + actualRowH > dims.pageBottom && pages[currentPage].length > 0) {
+    // For single-row tables where content overflows, use the smaller of the
+    // adjusted row H and the table's own declared height for page-fit checks
+    // (Hancom splits inside the cell across pages; we render the whole cell
+    // on whichever page it starts on).
+    const fitH = (rows.length === 1 && tblDeclaredH > 0 && tblDeclaredH < actualRowH)
+      ? tblDeclaredH
+      : actualRowH;
+    if (yPos + fitH > dims.pageBottom && pages[currentPage].length > 0) {
       // Flush accumulated cells before page break
       flushSegment(pageParts, segmentStartY);
       pageParts.push('</g>');
@@ -1010,45 +1204,192 @@ export function renderTableWithPageBreaks(
       pageParts = [`<g class="table">`];
     }
 
-    for (const cellEl of cells) {
-      const addrEl = findChild(cellEl, 'cellAddr');
-      const colAddr = addrEl ? intAttr(addrEl, 'colAddr', 0) : intAttr(cellEl, 'colAddr', 0);
-      const rowAddrCell = addrEl ? intAttr(addrEl, 'rowAddr', 0) : intAttr(cellEl, 'rowAddr', 0);
+    // Single-row single-cell tables (typical 별첨 wrapper) can be taller than
+    // one page can hold. If actualRowH > available space on the current page,
+    // cap the CURRENT-page cell rect at what fits, then render a continuation
+    // rect on the next page for the remainder. Content overflow is clipped by
+    // renderCellContent; the visual approximation is that the cell renders as
+    // a rectangle split across pages, mirroring Hancom's behaviour.
+    const availOnPage = dims.pageBottom - yPos;
+    const isSingleCellRow = rows.length === 1 && cells.length === 1;
+    // "글자처럼 취급" (treatAsChar=1) tables are laid out as a single character in
+    // the text flow and per HWP spec cannot be split across pages. Only allow
+    // page-splitting for floating (treatAsChar=0) tables.
+    const treatAsCharAttr = posEl ? attr(posEl, 'treatAsChar', '0') : '0';
+    const isTreatAsChar = treatAsCharAttr === '1';
+    const overflow = isSingleCellRow && !isTreatAsChar && actualRowH > availOnPage;
+    const thisPageH = overflow ? availOnPage : actualRowH;
 
-      if (coveredCells.has(`${rowAddrCell},${colAddr}`)) continue;
-
-      const spanEl = findChild(cellEl, 'cellSpan');
-      const colSpan = spanEl ? intAttr(spanEl, 'colSpan', 1) : intAttr(cellEl, 'colSpan', 1);
-      const rowSpan = spanEl ? intAttr(spanEl, 'rowSpan', 1) : intAttr(cellEl, 'rowSpan', 1);
-
-      let cellW: number;
-      if (colSpan > 1) {
-        cellW = 0;
-        for (let c = colAddr; c < colAddr + colSpan; c++) {
-          cellW += colWidths.get(c) ?? 0;
+    if (overflow) {
+      // Single-row single-cell overflow: render cell rect + content clipped to
+      // this page, then continuation rect + shifted content on the next page.
+      const cellEl = cells[0];
+      const addrEl2 = findChild(cellEl, 'cellAddr');
+      const colAddr2 = addrEl2 ? intAttr(addrEl2, 'colAddr', 0) : intAttr(cellEl, 'colAddr', 0);
+      const szEl2 = findChild(cellEl, 'cellSz');
+      const cellW2 = szEl2 ? hu2mm(intAttr(szEl2, 'width', 0)) : hu2mm(intAttr(cellEl, 'width', 0));
+      const bfIdRef2 = attr(cellEl, 'borderFillIDRef', '');
+      const borderFill2 = bfIdRef2 ? caches.borderFills.get(bfIdRef2) : undefined;
+      const x2 = dims.contentLeft + xOffsetMm + (colOffsets.get(colAddr2) ?? 0);
+      const rowY = yPos;
+      // Snap the split point to a content boundary — no inner treatAsChar=1
+      // (글자처럼 취급) nested table should straddle pageBottom (spec: those
+      // are laid out as a single character). When a straddle is detected, cut
+      // to the BOTTOM of the previous paragraph (its last lineseg) so the
+      // preceding text's descenders remain within the clip.
+      let consumedH = thisPageH;
+      {
+        const subList = find(cellEl, 'subList');
+        const cellParas = subList ? children(subList, 'p') : children(cellEl, 'p');
+        // HWP's per-paragraph lineseg vertpos is USUALLY cell-relative, but
+        // some paragraphs (typically the last one containing a treatAsChar=1
+        // table) reset to 0. Accumulate the max bottom seen so far as the
+        // effective start for the next paragraph when its own vertpos is 0.
+        let accBottomMm = 0;
+        let prevParaBottomMm = 0;
+        let prevFontSizeMm = 3.5;
+        for (const paraEl of cellParas) {
+          const lsas: Element[] = [];
+          for (const ch of Array.from(paraEl.children)) {
+            if ((ch.localName || ch.nodeName.split(':').pop()) === 'linesegarray') lsas.push(ch);
+          }
+          let paraStartHu = 0;
+          let paraBottomHu = 0;
+          for (const lsa of lsas) {
+            const segs = children(lsa, 'lineseg');
+            if (segs.length && paraStartHu === 0) paraStartHu = intAttr(segs[0], 'vertpos', 0);
+            for (const seg of segs) {
+              const b = intAttr(seg, 'vertpos', 0) + intAttr(seg, 'vertsize', 0);
+              if (b > paraBottomHu) paraBottomHu = b;
+            }
+          }
+          const paraStartMm = paraStartHu > 0 ? hu2mm(paraStartHu) : accBottomMm;
+          const paraBottomMm = paraBottomHu > 0 ? hu2mm(paraBottomHu) : accBottomMm;
+          const effectiveBottomMm = Math.max(paraBottomMm, paraStartMm);
+          for (const nestedTbl of findDirectTables(paraEl)) {
+            const posE = find(nestedTbl, 'pos');
+            const tac = posE ? attr(posE, 'treatAsChar', '0') : '0';
+            if (tac !== '1') continue;
+            const szEl = find(nestedTbl, 'sz');
+            const nestedH = szEl ? hu2mm(intAttr(szEl, 'height', 0)) : 0;
+            const startInCell = paraStartMm;
+            const endInCell = paraStartMm + nestedH;
+            if (startInCell < consumedH && endInCell > consumedH) {
+              // Snap to the previous paragraph's bottom + its font descent.
+              // HWP's lineseg vertsize covers the em-height plus HWP's own
+              // small descent allowance; our fallback font's descent is often
+              // taller, so include a descent-worth pad to keep the last text
+              // line's descenders on THIS page rather than bleeding to the
+              // next.
+              const descentPadMm = prevFontSizeMm * 0.25;
+              consumedH = Math.max(0, prevParaBottomMm + descentPadMm);
+            }
+          }
+          if (effectiveBottomMm > accBottomMm) accBottomMm = effectiveBottomMm;
+          prevParaBottomMm = effectiveBottomMm;
+          // Capture the paragraph's first-run font size as the "current" text
+          // scale for descent-pad calculation on the next snap iteration.
+          const paraFirstRun = collectRuns(paraEl)[0];
+          const paraCs = paraFirstRun ? caches.charShapes.get(paraFirstRun.charPrId) : undefined;
+          if (paraCs) prevFontSizeMm = hu2mm(paraCs.height);
         }
-      } else {
-        const szEl2 = findChild(cellEl, 'cellSz');
-        cellW = szEl2 ? hu2mm(intAttr(szEl2, 'width', 0)) : hu2mm(intAttr(cellEl, 'width', 0));
+      }
+      // Note: leftover content height = actualRowH − consumedH; used implicitly via contBoxH.
+
+      // Render cell content ONCE — same string reused on both pages, only clip changes
+      const contentSvg = renderCellContent(cellEl, caches, x2, rowY, cellW2, actualRowH, actualRowH).join('\n');
+
+      // Page 2: draw the box rect at the FULL available height (Hancom's
+      // wrapper extends to the page-bottom margin), while clipping content
+      // to consumedH (the safe snap point above the next treatAsChar=1
+      // nested table). remainH advances yPos by the leftover content, not by
+      // the visible-box height.
+      const boxH = thisPageH;   // visible rect fills the rest of the page
+      flushSegment(pageParts, segmentStartY);       // flush any prior rows
+      segmentCells.push({ x: x2, y: rowY, w: cellW2, h: boxH, bf: borderFill2, el: cellEl, declaredH: boxH });
+      const fillSvg = cellFillSvg(borderFill2, x2, rowY, cellW2, boxH, caches);
+      if (fillSvg) pageParts.push(fillSvg);
+      const { hLines: h2, vLines: v2 } = buildGridLines([{ x: x2, y: rowY, w: cellW2, h: boxH, bf: borderFill2 }], tableBf);
+      pageParts.push(...renderGridLines(h2, v2));
+      segmentCells = [];
+
+      // Clip content up to consumedH (bottom of the last paragraph that fits).
+      const clipIdP2 = `page-split-clip-${_gradIdCounter++}`;
+      pageParts.push(`<defs><clipPath id="${clipIdP2}"><rect x="${x2.toFixed(2)}" y="${rowY.toFixed(2)}" width="${cellW2.toFixed(2)}" height="${consumedH.toFixed(2)}"/></clipPath></defs>`);
+      pageParts.push(`<g clip-path="url(#${clipIdP2})">${contentSvg}</g>`);
+
+      pageParts.push('</g>');
+      if (pageParts.length > 2) {
+        pages[currentPage].push({ svg: pageParts.join('\n'), y: segmentStartY, height: 0 });
       }
 
-      let cellH = actualRowH;
-      if (rowSpan > 1) {
-        cellH = 0;
-        for (let r = rowAddrCell; r < rowAddrCell + rowSpan; r++) {
-          cellH += rowHeights.get(r) ?? 0;
-        }
-      }
-      const szElCell = findChild(cellEl, 'cellSz');
-      const declaredCellH = szElCell ? hu2mm(intAttr(szElCell, 'height', 0)) : hu2mm(intAttr(cellEl, 'height', 0));
+      // Page 3: continuation box uses the leftover cell height (actualRowH − boxH).
+      // Apply the outer table's outMargin.top on the new page too — each
+      // fragment respects the outer margins independently.
+      pages.push([]);
+      currentPage = pages.length - 1;
+      yPos = dims.contentTop + outMarginTop;
+      segmentStartY = yPos;
+      pageParts = [`<g class="table">`];
 
-      const x = dims.contentLeft + (colOffsets.get(colAddr) ?? 0);
-      const bfIdRef = attr(cellEl, 'borderFillIDRef', '');
-      const borderFill = bfIdRef ? caches.borderFills.get(bfIdRef) : undefined;
-      segmentCells.push({ x, y: yPos, w: cellW, h: cellH, bf: borderFill, el: cellEl, declaredH: declaredCellH });
+      const contBoxH = actualRowH - boxH;
+      const fillSvg3 = cellFillSvg(borderFill2, x2, yPos, cellW2, contBoxH, caches);
+      if (fillSvg3) pageParts.push(fillSvg3);
+      const { hLines: h3, vLines: v3 } = buildGridLines([{ x: x2, y: yPos, w: cellW2, h: contBoxH, bf: borderFill2 }], tableBf);
+      pageParts.push(...renderGridLines(h3, v3));
+
+      // Same content shifted up so overflow appears at top of page-3 continuation.
+      // The shift lines up the overflow content with the NEW cellContentY
+      // (yPos + cellMargin.top) so the continuation fragment preserves the
+      // cell's own top padding independently on the new page.
+      const cellMarginEl = findChild(cellEl, 'cellMargin');
+      const HWP_SENTINEL = 4294967295;
+      const rawTop = cellMarginEl ? intAttr(cellMarginEl, 'top', HWP_SENTINEL) : intAttr(cellEl, 'marginTop', HWP_SENTINEL);
+      const contMTopMm = hu2mm(rawTop === HWP_SENTINEL ? 141 : rawTop);
+      const shift = (rowY + consumedH) - (yPos + contMTopMm);
+      // Clip content to the cell-content area (below the box's top padding)
+      // so duplicated content from page 2 (originally above the split point)
+      // doesn't leak into page 3.
+      const contentClipY = yPos + contMTopMm;
+      const contentClipH = contBoxH - contMTopMm;
+      const clipIdP3 = `page-split-clip-${_gradIdCounter++}`;
+      pageParts.push(`<defs><clipPath id="${clipIdP3}"><rect x="${x2.toFixed(2)}" y="${contentClipY.toFixed(2)}" width="${cellW2.toFixed(2)}" height="${contentClipH.toFixed(2)}"/></clipPath></defs>`);
+      pageParts.push(`<g clip-path="url(#${clipIdP3})"><g transform="translate(0, ${(-shift).toFixed(2)})">${contentSvg}</g></g>`);
+
+      // Include the outer table's outMargin.bottom after the continuation
+      // fragment so subsequent content on page 3 clears the wrapper.
+      yPos += contBoxH + outMarginBottom;
+    } else {
+      for (const cellEl of cells) {
+        const addrEl = findChild(cellEl, 'cellAddr');
+        const colAddr = addrEl ? intAttr(addrEl, 'colAddr', 0) : intAttr(cellEl, 'colAddr', 0);
+        const rowAddrCell = addrEl ? intAttr(addrEl, 'rowAddr', 0) : intAttr(cellEl, 'rowAddr', 0);
+        if (coveredCells.has(`${rowAddrCell},${colAddr}`)) continue;
+        const spanEl = findChild(cellEl, 'cellSpan');
+        const colSpan = spanEl ? intAttr(spanEl, 'colSpan', 1) : intAttr(cellEl, 'colSpan', 1);
+        const rowSpan = spanEl ? intAttr(spanEl, 'rowSpan', 1) : intAttr(cellEl, 'rowSpan', 1);
+        let cellW: number;
+        if (colSpan > 1) {
+          cellW = 0;
+          for (let c = colAddr; c < colAddr + colSpan; c++) cellW += colWidths.get(c) ?? 0;
+        } else {
+          const szElW = findChild(cellEl, 'cellSz');
+          cellW = szElW ? hu2mm(intAttr(szElW, 'width', 0)) : hu2mm(intAttr(cellEl, 'width', 0));
+        }
+        let cellH = actualRowH;
+        if (rowSpan > 1) {
+          cellH = 0;
+          for (let r = rowAddrCell; r < rowAddrCell + rowSpan; r++) cellH += rowHeights.get(r) ?? 0;
+        }
+        const szElCell = findChild(cellEl, 'cellSz');
+        const declaredCellH = szElCell ? hu2mm(intAttr(szElCell, 'height', 0)) : hu2mm(intAttr(cellEl, 'height', 0));
+        const x = dims.contentLeft + xOffsetMm + (colOffsets.get(colAddr) ?? 0);
+        const bfIdRef = attr(cellEl, 'borderFillIDRef', '');
+        const borderFill = bfIdRef ? caches.borderFills.get(bfIdRef) : undefined;
+        segmentCells.push({ x, y: yPos, w: cellW, h: cellH, bf: borderFill, el: cellEl, declaredH: declaredCellH });
+      }
+      yPos += actualRowH;
     }
-
-    yPos += actualRowH;
   }
 
   // Flush final page segment
@@ -1078,6 +1419,16 @@ export function renderTableEl(
   const innerMR = hu2mm(intAttr(tblEl, 'innerMarginRight', 0));
   startX += innerML;
   contentWidth -= innerML + innerMR;
+
+  // Apply the anchored <hp:pos vertOffset/horzOffset> and outer margins so
+  // the visible table lines up with HWP's own layout.
+  const posEl = find(tblEl, 'pos');
+  if (posEl) {
+    startY += hu2mm(intAttr(posEl, 'vertOffset', 0));
+    startX += hu2mm(intAttr(posEl, 'horzOffset', 0));
+  }
+  const outMarginEl = find(tblEl, 'outMargin');
+  if (outMarginEl) startY += hu2mm(intAttr(outMarginEl, 'top', 0));
 
   const rows = children(tblEl, 'tr');
   if (rows.length === 0) return null;
@@ -1194,9 +1545,8 @@ export function renderTableEl(
   // Phase 1: all fills
   const parts: string[] = [`<g class="table">`];
   for (const pc of pendingCells) {
-    if (pc.bf?.fillColor) {
-      parts.push(`<rect x="${pc.x.toFixed(2)}" y="${pc.y.toFixed(2)}" width="${pc.w.toFixed(2)}" height="${pc.h.toFixed(2)}" fill="${pc.bf.fillColor}" stroke="none"/>`);
-    }
+    const s = cellFillSvg(pc.bf, pc.x, pc.y, pc.w, pc.h, caches);
+    if (s) parts.push(s);
   }
   // Phase 2: grid-detected border lines (each unique segment once, table outer border as fallback)
   const { hLines, vLines } = buildGridLines(pendingCells.map(pc => ({ x: pc.x, y: pc.y, w: pc.w, h: pc.h, bf: pc.bf })), tableBf);

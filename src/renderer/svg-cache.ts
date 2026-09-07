@@ -2,8 +2,8 @@
  * Build caches (charShapes, paraShapes, borderFills) from header DOM.
  */
 
-import type { CharShapeInfo, ParaShapeInfo, BorderFillInfo, Caches } from './svg-types.js';
-import { attr, intAttr, find, findAll, children } from './svg-utils.js';
+import type { CharShapeInfo, ParaShapeInfo, BorderFillInfo, Caches, FontKind } from './svg-types.js';
+import { attr, intAttr, find, findAll, children, familyTypeToKind, classifyFontByName } from './svg-utils.js';
 
 // ── Alignment string → int mapping ──
 
@@ -28,7 +28,7 @@ export function parseAlign(el: Element, attrName: string, def: number): number {
 
 // ── Build caches from header DOM ──
 
-export function buildCaches(header: Document): Caches {
+export function buildCaches(header: Document, binData?: Map<number, string>): Caches {
   const root = header.documentElement;
 
   // Build per-language font maps from HWPX native format:
@@ -36,6 +36,15 @@ export function buildCaches(header: Document): Caches {
   // Also support legacy converter format: <hh:fontface id="N" name="..."/>
   const langFontMaps = new Map<string, Map<string, string>>();
   const legacyFontMap = new Map<string, string>();
+  // face name → FontKind (serif/sans-serif/…). Populated from familyType on
+  // hh:typeInfo where present, otherwise inferred from the face name below
+  // when the renderer looks up a font it hasn't classified yet.
+  const fontKinds = new Map<string, FontKind>();
+  const noteKind = (face: string, familyType: string) => {
+    if (!face) return;
+    const kind = familyType ? familyTypeToKind(familyType) : undefined;
+    if (kind && !fontKinds.has(face)) fontKinds.set(face, kind);
+  };
   for (const fontfaceEl of findAll(root, 'fontface')) {
     const lang = attr(fontfaceEl, 'lang', '');
     const legacyId = attr(fontfaceEl, 'id', '');
@@ -43,6 +52,8 @@ export function buildCaches(header: Document): Caches {
       // Legacy: <hh:fontface id="N" name="..."/>
       const face = attr(fontfaceEl, 'name', '') || attr(fontfaceEl, 'face', '');
       if (face) legacyFontMap.set(legacyId, face);
+      const ti = find(fontfaceEl, 'typeInfo');
+      if (ti) noteKind(face, attr(ti, 'familyType', ''));
     } else if (lang) {
       // HWPX native: per-language font list
       const langMap = new Map<string, string>();
@@ -50,6 +61,8 @@ export function buildCaches(header: Document): Caches {
         const fid = attr(fontEl, 'id', '');
         const face = attr(fontEl, 'face', '') || attr(fontEl, 'name', '');
         if (fid && face) langMap.set(fid, face);
+        const ti = find(fontEl, 'typeInfo');
+        if (ti) noteKind(face, attr(ti, 'familyType', ''));
       }
       langFontMaps.set(lang.toUpperCase(), langMap);
     }
@@ -75,6 +88,25 @@ export function buildCaches(header: Document): Caches {
     const bold = boldAttr === '1' || boldAttr === 'true' || find(el, 'bold') !== null;
     const italicAttr = attr(el, 'italic', '');
     const italic = italicAttr === '1' || italicAttr === 'true' || find(el, 'italic') !== null;
+
+    // Underline: <hh:underline type="BOTTOM|CENTER|TOP" shape="..." color="..."/>
+    // Only type="BOTTOM" is a genuine underline. type="CENTER" and "TOP" are
+    // strike-through / overline positions handled elsewhere; we don't map them
+    // to text-decoration here because Hancom's own renderer treats them
+    // separately from a normal underline.
+    const underlineEl = find(el, 'underline');
+    const underlineTypeAttr = underlineEl ? attr(underlineEl, 'type', 'BOTTOM')
+      : attr(el, 'underlineType', '');
+    const underline = !!underlineEl && underlineTypeAttr === 'BOTTOM';
+    const underlineColor = underlineEl
+      ? (attr(underlineEl, 'color', '') || textColor)
+      : textColor;
+    const underlineShape = underlineEl ? attr(underlineEl, 'shape', 'SOLID') : 'SOLID';
+
+    // Strikeout: intentionally not rendered. Our own hwp→hwpx converter
+    // currently over-reports strikeout in intermediate output; until that's
+    // straightened out, false positives would add many bogus strikethroughs.
+    const strikeout = false;
 
     // Font: look for fontRef child with per-language IDs
     let fontName = 'sans-serif';
@@ -114,7 +146,19 @@ export function buildCaches(header: Document): Caches {
       spacingLatin = spacing;
     }
 
-    charShapes.set(id, { height, textColor, bold, italic, fontName, fontNameLatin, spacing, spacingLatin, ratio, ratioLatin });
+    charShapes.set(id, {
+      height, textColor, bold, italic,
+      underline: !!underline, underlineColor, underlineShape, strikeout,
+      fontName, fontNameLatin,
+      spacing, spacingLatin, ratio, ratioLatin,
+    });
+
+    // Fill in name-based kinds for any font we've seen but never classified.
+    // This runs after every charPr because font names may appear across many
+    // charPrs; the map itself is idempotent.
+    for (const nm of [fontName, fontNameLatin]) {
+      if (nm && !fontKinds.has(nm)) fontKinds.set(nm, classifyFontByName(nm));
+    }
   }
 
   // Build paraShape cache
@@ -186,6 +230,14 @@ export function buildCaches(header: Document): Caches {
     const lineWrapRaw = attr(el, 'lineWrap', '') || attr(el, 'LineWrap', '') || (breakSettingEl ? attr(breakSettingEl, 'lineWrap', '') : '');
     const lineWrap = lineWrapRaw ? lineWrapRaw.toUpperCase() : undefined;
 
+    // Heading type BULLET references a bullet definition (bullets/id → glyph).
+    // Other heading types (OUTLINE, NONE) are ignored here for now.
+    let bulletId = 0;
+    const headingEl = find(el, 'heading');
+    if (headingEl && attr(headingEl, 'type', '') === 'BULLET') {
+      bulletId = intAttr(headingEl, 'idRef', 0);
+    }
+
     paraShapes.set(id, {
       alignment,
       leftMargin,
@@ -195,6 +247,7 @@ export function buildCaches(header: Document): Caches {
       spacingAfter,
       lineSpacing,
       lineWrap,
+      bulletId,
     });
   }
 
@@ -209,7 +262,14 @@ export function buildCaches(header: Document): Caches {
 
     // Legacy format: flat fillColor attribute
     // HWPX native: <hc:fillBrush><hc:winBrush faceColor="#RRGGBB" .../></hc:fillBrush>
+    // Gradient: <hc:fillBrush><hc:gradation type="LINEAR" angle="90" ...>
+    //             <hc:color value="#RRGGBB"/> ... </hc:gradation></hc:fillBrush>
     let fillColor: string | null = null;
+    let gradientType: string | undefined;
+    let gradientAngle: number | undefined;
+    let gradientColors: string[] | undefined;
+    let imageFillMode: string | undefined;
+    let imageBinDataId: number | undefined;
     const fillColorAttr = attr(el, 'fillColor', '');
     if (fillColorAttr && fillColorAttr !== 'none') {
       fillColor = fillColorAttr;
@@ -220,6 +280,25 @@ export function buildCaches(header: Document): Caches {
         if (winBrush) {
           const fc = attr(winBrush, 'faceColor', 'none');
           if (fc && fc !== 'none') fillColor = fc;
+        }
+        const gradation = find(fillBrush, 'gradation');
+        if (gradation) {
+          gradientType = attr(gradation, 'type', 'LINEAR');
+          gradientAngle = parseInt(attr(gradation, 'angle', '0'), 10) || 0;
+          gradientColors = [];
+          for (const c of children(gradation, 'color')) {
+            const v = attr(c, 'value', '');
+            if (v) gradientColors.push(v);
+          }
+          if (gradientColors.length === 0) gradientColors = undefined;
+        }
+        const imgBrush = find(fillBrush, 'imgBrush');
+        if (imgBrush) {
+          imageFillMode = attr(imgBrush, 'mode', 'RESIZE');
+          const imgEl = find(imgBrush, 'image');
+          if (imgEl) {
+            imageBinDataId = parseInt(attr(imgEl, 'binaryItemIDRef', '0'), 10) || undefined;
+          }
         }
       }
     }
@@ -248,6 +327,11 @@ export function buildCaches(header: Document): Caches {
 
     borderFills.set(id, {
       fillColor,
+      gradientType,
+      gradientAngle,
+      gradientColors,
+      imageFillMode,
+      imageBinDataId,
       leftBorderType: left.type,
       leftBorderWidth: left.width,
       leftBorderColor: left.color,
@@ -263,7 +347,17 @@ export function buildCaches(header: Document): Caches {
     });
   }
 
-  return { charShapes, paraShapes, borderFills };
+  // Build bullet definition cache: id → single character (usually a Hancom
+  // PUA glyph like U+F09F which renders as •). Callers should route the
+  // char through mapPuaStringToUnicode before display.
+  const bullets = new Map<string, string>();
+  for (const el of findAll(root, 'bullet')) {
+    const id = attr(el, 'id', '');
+    const ch = attr(el, 'char', '');
+    if (id && ch) bullets.set(id, ch);
+  }
+
+  return { charShapes, paraShapes, borderFills, fontKinds, bullets, binData: binData ?? new Map() };
 }
 
 // ── Page dimensions ──
@@ -286,6 +380,16 @@ export function getPageDims(sectionRoot: Element): import('./svg-types.js').Page
   if (pageSource) {
     width = intAttr(pageSource, 'width', DEF_W);
     height = intAttr(pageSource, 'height', DEF_H);
+
+    // Landscape orientation swaps the visible page dimensions. HWPX
+    // encodes this as a string ("LANDSCAPE"/"NARROWLY"); the HWP binary
+    // record uses bit 0 of the attrs flag (see hwp-section.ts). Either
+    // way, when landscape, the paper is rotated 90° relative to the
+    // stored width/height.
+    const landscape = attr(pageSource, 'landscape');
+    if (landscape === 'LANDSCAPE' || landscape === '1') {
+      [width, height] = [height, width];
+    }
 
     const marginEl = find(pageSource, 'margin');
     if (marginEl) {

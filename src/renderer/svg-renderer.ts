@@ -19,7 +19,7 @@ export type { CharShapeInfo, ParaShapeInfo, BorderFillInfo, Caches, PageDims, La
 
 export function renderToSvg(dom: HwpxDom): string[] {
   resetClipIdCounter();  // Reset clip ID counter for each document render
-  const caches = buildCaches(dom.header);
+  const caches = buildCaches(dom.header, dom.binData);
   const pages: string[] = [];
 
   for (const sectionDoc of dom.sections) {
@@ -55,9 +55,12 @@ function renderSection(sectionDoc: Document, caches: Caches): string[] {
     if (lname === 'p') {
       const linesegArray = children(child, 'linesegarray')[0];
       const firstSeg = linesegArray ? children(linesegArray, 'lineseg')[0] : null;
-      if (firstSeg && lastParaStartVP > 0) {
+      if (firstSeg && pages[currentPage].length > 0) {
+        // HWP resets lineseg vertpos to 0 (or near 0) at the top of each new
+        // page. Any drop from the previous paragraph's start vertpos means
+        // we've begun a new page — page-break before rendering.
         const vertpos = intAttr(firstSeg, 'vertpos', 0);
-        if (vertpos < lastParaStartVP - 2000 && pages[currentPage].length > 0) {
+        if (vertpos < lastParaStartVP) {
           pages.push([]);
           currentPage = pages.length - 1;
           yPos = dims.contentTop;

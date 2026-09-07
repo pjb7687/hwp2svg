@@ -126,6 +126,13 @@ export interface BorderFillInfo {
   fillColor: number | null;
   fillBackColor: number | null;
   fillPatternType: number | null;
+  /** Gradient fill (HWP 표 28, bit 2). Colors stored as raw COLORREF UINT32. */
+  gradientType?: number;
+  gradientAngle?: number;
+  gradientColors?: number[];
+  /** Image fill (HWP 표 28, bit 1). imageBinDataId → BinData record. */
+  imageFillType?: number;   // 0=TILE_ALL, 5=RESIZE, 6=CENTER, ...
+  imageBinDataId?: number;
 }
 
 export interface TabItemInfo {
@@ -314,7 +321,76 @@ export interface FieldEndControlInfo {
   beginId: number;  // id of the matching fieldBegin
 }
 
-export type ControlInfo = TableControlInfo | SectionDefInfo | ColDefInfo | PageNumInfo | HeaderFooterInfo | FieldBeginControlInfo | FieldEndControlInfo;
+export interface RectFillInfo {
+  /** solid: single COLORREF; gradient: type + colors[]; none: undefined */
+  kind: 'solid' | 'gradient' | 'none';
+  color?: string;             // solid: #RRGGBB
+  gradientType?: number;      // 1=LINEAR, 2=CIRCULAR, 3=CONICAL, 4=RECTANGULAR
+  gradientAngle?: number;     // degrees
+  gradientColors?: string[];  // ["#RRGGBB", …] in stop order
+}
+
+export interface RectControlInfo {
+  type: 'rect';
+  instanceId: number;
+  ctrlWidth: number;
+  ctrlHeight: number;
+  xOffset: number;
+  yOffset: number;
+  outMarginLeft: number;
+  outMarginRight: number;
+  outMarginTop: number;
+  outMarginBottom: number;
+  zOrder: number;
+  textWrap: number;
+  textFlow: number;
+  treatAsChar: boolean;
+  affectLSpacing: boolean;
+  flowWithText: boolean;
+  vertRelTo: number;
+  vertAlignPos: number;
+  horzRelTo: number;
+  horzAlignPos: number;
+  fill: RectFillInfo;
+  borderColor: string;
+  /** Paragraphs inside the rect's text box, if any. */
+  paragraphs?: ParaInfo[];
+  borderWidth: number;  // HWPUNIT
+}
+
+export interface PicControlInfo {
+  type: 'pic';
+  instanceId: number;
+  // GSO common properties (position/size in HWPUNIT relative to the anchor)
+  ctrlWidth: number;
+  ctrlHeight: number;
+  xOffset: number;
+  yOffset: number;
+  outMarginLeft: number;
+  outMarginRight: number;
+  outMarginTop: number;
+  outMarginBottom: number;
+  zOrder: number;
+  textWrap: number;
+  textFlow: number;
+  treatAsChar: boolean;
+  affectLSpacing: boolean;
+  flowWithText: boolean;
+  vertRelTo: number;
+  vertAlignPos: number;
+  horzRelTo: number;
+  horzAlignPos: number;
+  // Picture specifics
+  /** binData id referenced by this picture (matches BinDataItemInfo.binDataId) */
+  binDataId: number;
+  /** cropping rectangle within the source image, in HWPUNITs (usually 0,0,W,H) */
+  cropLeft: number;
+  cropTop: number;
+  cropRight: number;
+  cropBottom: number;
+}
+
+export type ControlInfo = TableControlInfo | SectionDefInfo | ColDefInfo | PageNumInfo | HeaderFooterInfo | FieldBeginControlInfo | FieldEndControlInfo | PicControlInfo | RectControlInfo;
 
 export interface TableControlInfo {
   type: 'table';
