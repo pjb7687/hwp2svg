@@ -1,7 +1,9 @@
 import { convertHwpToHwpx } from './hwp/converter.js';
 import { extractHwpxZip, loadHwpxDom, type HwpxDom } from './hwpx/loader.js';
 import { renderToSvg, renderPageToSvg, registerFont, clearFonts } from './renderer/svg-renderer.js';
+import { renderToHtml, type HtmlOptions } from './renderer/html-renderer.js';
 export { registerFont, clearFonts } from './renderer/svg-renderer.js';
+export { renderToHtml, type HtmlOptions } from './renderer/html-renderer.js';
 import * as fs from './fs/idb-fs.js';
 
 export type { HwpxDom } from './hwpx/loader.js';
@@ -60,6 +62,10 @@ export class HwpxDocument {
       this.cachedPages = renderToSvg(this.dom);
     }
     return this.cachedPages;
+  }
+
+  renderHtml(options?: HtmlOptions): string {
+    return renderToHtml(this.dom, options);
   }
 
   get pageCount(): number {

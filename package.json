@@ -1,13 +1,14 @@
 {
   "name": "hwp-to-svg",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Convert Korean HWP/HWPX (한글) documents to SVG — one SVG string per page",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "hwp2svg": "dist/cli/hwp2svg.js",
-    "hwp2hwpx": "dist/cli/hwp2hwpx.js"
+    "hwp2hwpx": "dist/cli/hwp2hwpx.js",
+    "hwp2html": "dist/cli/hwp2html.js"
   },
   "files": [
     "dist/",
